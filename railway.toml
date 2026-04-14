@@ -1,0 +1,97 @@
+# Railway template manifest for inchambers-gateway.
+#
+# One-click deploy:
+#   https://railway.com/new/template?template=https://github.com/inchambers-ai/gateway-deploy&plugins=postgresql
+#
+# The link opens Railway's new-project wizard with Postgres plugin
+# pre-selected and the four gateway services laid out below.
+# The admin fills in the required env vars (marked `required=true`) and
+# clicks Deploy. Railway spins up the stack in ~3-5 minutes.
+
+[build]
+  # Railway uses Nixpacks by default; we override per-service to point at
+  # each service's Dockerfile so Rust / Python / React / Caddy builds stay
+  # deterministic and match the images used in every other cloud.
+
+# ─── Caddy (public ingress) ─────────────────────────────────────────────
+[[services]]
+  name = "caddy"
+  source = { repo = "inchambers-ai/inchambers", rootDirectory = "gateway/caddy" }
+  [services.build]
+    builder = "DOCKERFILE"
+    dockerfilePath = "Dockerfile"
+  [services.deploy]
+    startCommand = "/entrypoint.sh"
+    healthcheckPath = "/health"
+    healthcheckTimeout = 60
+    restartPolicyType = "ALWAYS"
+  [services.network]
+    # Caddy is the only publicly-exposed service. Railway auto-provisions
+    # an HTTPS *.up.railway.app hostname; custom domain via dashboard.
+    public = true
+  [services.variables]
+    GATEWAY_DOMAIN    = { default = "${{RAILWAY_PUBLIC_DOMAIN}}" }
+    CADDY_TLS_MODE    = { default = "off" }  # Railway terminates TLS for us
+    ALLOWED_ORIGIN    = { default = "https://app.inchambers.ai" }
+    UPSTREAM_RELAY    = { default = "${{relay.RAILWAY_PRIVATE_DOMAIN}}:8081" }
+    UPSTREAM_LITELLM  = { default = "${{litellm.RAILWAY_PRIVATE_DOMAIN}}:4000" }
+    UPSTREAM_ADMIN    = { default = "${{admin-ui.RAILWAY_PRIVATE_DOMAIN}}:3000" }
+
+# ─── Relay (Rust, subscription-token providers) ─────────────────────────
+[[services]]
+  name = "relay"
+  source = { repo = "inchambers-ai/inchambers", rootDirectory = "gateway/services/relay" }
+  [services.build]
+    builder = "DOCKERFILE"
+    dockerfilePath = "Dockerfile"
+  [services.deploy]
+    healthcheckPath = "/health"
+    restartPolicyType = "ALWAYS"
+  [services.variables]
+    RELAY_BIND_ADDR                = { default = "0.0.0.0:8081" }
+    GATEWAY_ORG_ID                 = { required = true, description = "Your inchambers.ai org UUID" }
+    GATEWAY_MASTER_KEY             = { required = true, description = "32 random bytes, base64 (openssl rand -base64 32)", generator = "secret" }
+    JWKS_URL                       = { default = "https://app.inchambers.ai/.well-known/jwks.json" }
+    DATABASE_URL                   = { default = "${{Postgres.DATABASE_URL}}" }
+    ENABLE_REMOTE_REVOCATION_CHECK = { default = "false" }
+    RUST_LOG                       = { default = "ic_gateway_relay=info,tower_http=info" }
+
+# ─── LiteLLM (API-key providers) ────────────────────────────────────────
+[[services]]
+  name = "litellm"
+  source = { repo = "inchambers-ai/inchambers", rootDirectory = "gateway/services/litellm" }
+  [services.build]
+    builder = "DOCKERFILE"
+    dockerfilePath = "Dockerfile"
+  [services.deploy]
+    healthcheckPath = "/health/liveliness"
+    restartPolicyType = "ALWAYS"
+  [services.variables]
+    GATEWAY_ORG_ID     = { default = "${{relay.GATEWAY_ORG_ID}}" }
+    JWKS_URL           = { default = "https://app.inchambers.ai/.well-known/jwks.json" }
+    DATABASE_URL       = { default = "${{Postgres.DATABASE_URL}}" }
+    LITELLM_MASTER_KEY = { required = true, description = "LiteLLM admin key (random secret)", generator = "secret" }
+    OPENROUTER_API_KEY = { description = "Optional — paste your OpenRouter key to enable all API-key providers" }
+    AZURE_FOUNDRY_URL  = { description = "Optional — your Azure AI Foundry resource URL" }
+    AZURE_FOUNDRY_KEY  = { description = "Optional — matching Foundry API key" }
+
+# ─── Admin UI (React) ───────────────────────────────────────────────────
+[[services]]
+  name = "admin-ui"
+  source = { repo = "inchambers-ai/inchambers", rootDirectory = "gateway/admin-ui" }
+  [services.build]
+    builder = "DOCKERFILE"
+    dockerfilePath = "Dockerfile"
+  [services.deploy]
+    healthcheckPath = "/admin/"
+    restartPolicyType = "ALWAYS"
+
+# ─── Plugins ────────────────────────────────────────────────────────────
+# Railway injects DATABASE_URL into services that reference it via
+# `${{Postgres.DATABASE_URL}}`. Redis is intentionally omitted — the
+# relay rate-limits in-memory.
+
+[[plugins]]
+  name = "Postgres"
+  [plugins.config]
+    version = "16"

@@ -1,0 +1,102 @@
+## inchambers-gateway Helm values
+## See templates/_helpers.tpl for how each value is consumed.
+
+# The inchambers.ai org UUID this gateway serves. JWTs from other orgs are rejected.
+orgId: ""
+
+# Public hostname for the gateway. Used for Caddy's TLS + CORS.
+gatewayDomain: gateway.example.com
+
+# Browser origin allowed by CORS (defaults to inchambers.ai add-in).
+allowedOrigin: https://app.inchambers.ai
+
+# JWKS URL for JWT validation.
+jwksUrl: https://app.inchambers.ai/.well-known/jwks.json
+
+# Container image registry + tag. The chart pulls the 4 service images from
+# `{{ .Values.image.registry }}/ic-gateway-{service}:{{ .Values.image.tag }}`.
+image:
+  registry: ghcr.io/inchambers-ai
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# Ingress — either use the built-in Kubernetes Ingress (set enabled: true)
+# or rely on Caddy's ACME directly (expose Caddy via LoadBalancer / NodePort).
+# The annotations below are the nginx-ingress defaults needed for streaming
+# SSE to work end-to-end. For traefik / contour / others, translate the
+# equivalent knobs: proxy buffering off, large read-timeout, chunked on.
+ingress:
+  enabled: false
+  className: nginx
+  tls: true
+  annotations:
+    # Disable response buffering — SSE frames must flush straight through.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # Long completions can run for minutes; default 60s kills mid-stream.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Let the response body be arbitrary size.
+    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
+
+# Caddy runs with TLS handled by the ingress when enabled, or internally
+# via ACME when no ingress is in front.
+caddy:
+  replicas: 1
+  resources:
+    limits: { cpu: 500m, memory: 512Mi }
+    requests: { cpu: 100m, memory: 128Mi }
+
+relay:
+  replicas: 1
+  resources:
+    limits: { cpu: 1000m, memory: 1Gi }
+    requests: { cpu: 200m, memory: 256Mi }
+
+litellm:
+  replicas: 1
+  resources:
+    limits: { cpu: 1000m, memory: 1Gi }
+    requests: { cpu: 200m, memory: 512Mi }
+
+adminUi:
+  replicas: 1
+  resources:
+    limits: { cpu: 250m, memory: 256Mi }
+    requests: { cpu: 50m, memory: 64Mi }
+
+# ─── Secrets ────────────────────────────────────────────────────────────────
+# Provide these via helm install --set-file / --set, or with an external
+# secret operator (External Secrets Operator, Sealed Secrets). The chart
+# will create a Secret resource from the values below if `secret.create`
+# is true; otherwise it references `secret.existingName`.
+secret:
+  create: true
+  existingName: ""
+  gatewayMasterKey: "" # 32 random bytes, base64 — openssl rand -base64 32
+  litellmMasterKey: "" # sk-... random
+  openRouterApiKey: ""
+  azureFoundryKey: ""
+  pgPassword: ""
+
+# Azure AI Foundry direct (non-secret part)
+azureFoundry:
+  url: ""
+
+# ─── Dependencies ───────────────────────────────────────────────────────────
+# Point at a managed Postgres (RDS, Cloud SQL, Azure DB for Postgres, etc.).
+# The chart deliberately does NOT ship a bundled Postgres — run an HA
+# managed service for Kubernetes deployments. Redis is not used by the
+# default relay (in-memory rate limiter); leave externalRedis blank.
+externalDatabase:
+  url: "" # required: postgres://user:pass@host:5432/gateway?sslmode=require
+externalRedis:
+  # Only used if you scale the relay past 1 replica AND want cross-replica
+  # rate limits. Leave blank for in-memory per-replica limiting.
+  url: ""
+
+postgresql:
+  enabled: false
+  auth:
+    username: gateway
+    database: gateway

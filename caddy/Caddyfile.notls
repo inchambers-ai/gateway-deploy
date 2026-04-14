@@ -1,0 +1,77 @@
+# Plain-HTTP Caddy config used when the deployment terminates TLS upstream
+# (ALB, Cloud Run, Azure Container Apps, an Ingress controller, etc.).
+# Caddy listens on :80 only; no ACME, no internal CA, no `tls` directive.
+
+{
+    auto_https off
+}
+
+:80 {
+    @cors_preflight method OPTIONS
+    handle @cors_preflight {
+        header Access-Control-Allow-Origin "{$ALLOWED_ORIGIN:https://app.inchambers.ai}"
+        header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+        header Access-Control-Allow-Headers "Authorization, Content-Type, X-IC-Client"
+        header Access-Control-Max-Age "86400"
+        respond "" 204
+    }
+
+    header {
+        Access-Control-Allow-Origin "{$ALLOWED_ORIGIN:https://app.inchambers.ai}"
+        Access-Control-Expose-Headers "X-Request-Id, Retry-After"
+    }
+
+    handle /health {
+        respond "ok" 200
+    }
+
+    handle_path /admin {
+        redir /admin/ permanent
+    }
+
+    handle /admin/* {
+        reverse_proxy {$UPSTREAM_ADMIN:admin-ui:3000}
+    }
+
+    handle /admin-api/* {
+        uri replace /admin-api/ /admin/
+        reverse_proxy {$UPSTREAM_RELAY:relay:8081}
+    }
+
+    handle /subscription/* {
+        uri strip_prefix /subscription
+        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+            flush_interval -1
+            transport http {
+                read_timeout 3600s
+                write_timeout 3600s
+            }
+        }
+    }
+
+    handle /anthropic/* {
+        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+            flush_interval -1
+            transport http {
+                read_timeout 3600s
+                write_timeout 3600s
+            }
+        }
+    }
+
+    handle {
+        reverse_proxy {$UPSTREAM_LITELLM:litellm:4000} {
+            flush_interval -1
+            transport http {
+                read_timeout 3600s
+                write_timeout 3600s
+            }
+        }
+    }
+
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+}

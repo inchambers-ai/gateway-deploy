@@ -1,0 +1,108 @@
+# Caddy uses its baked-in Caddyfile / Caddyfile.notls; no ConfigMap needed.
+# To customize, build your own image from gateway/caddy/ and override
+# image.registry + image.tag.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ic-gateway.fullname" . }}-caddy
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "ic-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.caddy.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: caddy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: caddy
+    spec:
+      containers:
+        - name: caddy
+          # Pull the custom Caddy image (ships both Caddyfile + Caddyfile.notls
+          # plus the entrypoint that picks based on CADDY_TLS_MODE).
+          image: "{{ .Values.image.registry }}/ic-gateway-caddy:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 80
+            - containerPort: 443
+          env:
+            - name: GATEWAY_DOMAIN
+              value: {{ .Values.gatewayDomain | quote }}
+            - name: CADDY_TLS_MODE
+              # When an Ingress controller terminates TLS upstream, Caddy
+              # runs plain HTTP on :80 (`off` → Caddyfile.notls). Otherwise
+              # Caddy provisions its own cert via ACME (`auto`) or uses its
+              # internal CA (`internal`) for on-prem LAN deployments.
+              value: {{ if .Values.ingress.enabled }}"off"{{ else }}{{ if hasPrefix "localhost" .Values.gatewayDomain }}"internal"{{ else }}"auto"{{ end }}{{ end }}
+            - name: ALLOWED_ORIGIN
+              value: {{ .Values.allowedOrigin | quote }}
+            - name: CADDY_ACME_EMAIL
+              value: "admin@inchambers.ai"
+            # Upstream service hostnames — fully-qualified so the baked-in
+            # Caddyfile (whose defaults assume compose service names)
+            # resolves to the right Kubernetes Services.
+            - name: UPSTREAM_RELAY
+              value: "{{ include "ic-gateway.fullname" . }}-relay:8081"
+            - name: UPSTREAM_LITELLM
+              value: "{{ include "ic-gateway.fullname" . }}-litellm:4000"
+            - name: UPSTREAM_ADMIN
+              value: "{{ include "ic-gateway.fullname" . }}-admin:3000"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources: {{- toYaml .Values.caddy.resources | nindent 12 }}
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ic-gateway.fullname" . }}-caddy
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "ic-gateway.labels" . | nindent 4 }}
+spec:
+  type: {{ if .Values.ingress.enabled }}ClusterIP{{ else }}LoadBalancer{{ end }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: caddy
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+    - name: https
+      port: 443
+      targetPort: 443
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "ic-gateway.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "ic-gateway.labels" . | nindent 4 }}
+  annotations: {{- toYaml .Values.ingress.annotations | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    - hosts:
+        - {{ .Values.gatewayDomain }}
+      secretName: {{ include "ic-gateway.fullname" . }}-tls
+  {{- end }}
+  rules:
+    - host: {{ .Values.gatewayDomain }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "ic-gateway.fullname" . }}-caddy
+                port:
+                  number: 80
+{{- end }}

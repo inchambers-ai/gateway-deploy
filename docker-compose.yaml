@@ -1,0 +1,83 @@
+# Production docker-compose — pulls pre-built images from a registry.
+# For building from source, use ../../compose.yaml instead.
+#
+# Redis is intentionally absent: the Rust relay rate-limits in-process
+# and LiteLLM runs in single-instance mode. Add a Redis service only if
+# you're scaling beyond one replica of either service.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Path is RELATIVE to this file's location. In the public gateway-deploy
+      # repo (and on a VM's /opt/inchambers-gateway/ layout), `./caddy/`
+      # sits next to docker-compose.yaml. Don't use `../../caddy/` — that
+      # path only resolves inside the private monorepo's nested folder.
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      GATEWAY_DOMAIN: ${GATEWAY_DOMAIN}
+      CADDY_TLS_MODE: ${CADDY_TLS_MODE:-auto}
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:-admin@inchambers.ai}
+      ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-https://app.inchambers.ai}
+    depends_on: [ litellm, relay, admin-ui ]
+
+  relay:
+    image: ${REGISTRY:-ghcr.io/inchambers-ai}/ic-gateway-relay:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      RELAY_BIND_ADDR: "0.0.0.0:8081"
+      GATEWAY_ORG_ID: ${GATEWAY_ORG_ID}
+      GATEWAY_MASTER_KEY: ${GATEWAY_MASTER_KEY}
+      JWKS_URL: ${JWKS_URL:-https://app.inchambers.ai/.well-known/jwks.json}
+      DATABASE_URL: ${DATABASE_URL:-postgres://gateway:gateway@postgres:5432/gateway}
+      ENABLE_REMOTE_REVOCATION_CHECK: ${ENABLE_REMOTE_REVOCATION_CHECK:-false}
+      INCHAMBERS_API: ${INCHAMBERS_API:-https://app.inchambers.ai}
+      RUST_LOG: ${RUST_LOG:-ic_gateway_relay=info,tower_http=info}
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  litellm:
+    image: ${REGISTRY:-ghcr.io/inchambers-ai}/ic-gateway-litellm:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      GATEWAY_ORG_ID: ${GATEWAY_ORG_ID}
+      JWKS_URL: ${JWKS_URL:-https://app.inchambers.ai/.well-known/jwks.json}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      DATABASE_URL: ${DATABASE_URL:-postgres://gateway:gateway@postgres:5432/gateway}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      AZURE_FOUNDRY_URL: ${AZURE_FOUNDRY_URL:-}
+      AZURE_FOUNDRY_KEY: ${AZURE_FOUNDRY_KEY:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  admin-ui:
+    image: ${REGISTRY:-ghcr.io/inchambers-ai}/ic-gateway-admin-ui:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-gateway}
+      POSTGRES_DB: gateway
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  caddy-data:
+  caddy-config:
+  postgres-data:

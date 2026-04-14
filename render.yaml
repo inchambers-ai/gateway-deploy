@@ -1,0 +1,108 @@
+# Render Blueprint for inchambers-gateway.
+#
+# One-click deploy:
+#   https://render.com/deploy?repo=https://github.com/inchambers-ai/inchambers/tree/main/gateway
+#
+# Blueprint Services:
+#   * caddy    — public ingress, TLS via Render-managed cert
+#   * relay    — Rust subscription-token relay
+#   * litellm  — Python LiteLLM fork
+#   * admin-ui — React static site served by nginx
+#   * postgres — Render-native Postgres
+#
+# All four services build from their respective Dockerfiles so the images
+# stay identical to every other deployment target.
+
+databases:
+  - name: ic-gateway-postgres
+    databaseName: gateway
+    user: gateway
+    plan: basic-256mb           # ~$6/mo; upgrade in the dashboard if needed
+    postgresMajorVersion: "16"
+
+services:
+  # ─── Public gateway (Caddy reverse proxy) ─────────────────────────────
+  - type: web
+    name: ic-gateway-caddy
+    runtime: docker
+    rootDir: gateway/caddy
+    dockerfilePath: ./Dockerfile
+    plan: starter              # ~$7/mo; keeps the service warm 24/7
+    healthCheckPath: /health
+    envVars:
+      - key: CADDY_TLS_MODE
+        value: off             # Render terminates TLS at its edge
+      - key: GATEWAY_DOMAIN
+        sync: false            # Render injects RENDER_EXTERNAL_HOSTNAME at runtime
+      - key: ALLOWED_ORIGIN
+        value: https://app.inchambers.ai
+      # Render services in the same region resolve via `<name>:<port>`.
+      - key: UPSTREAM_RELAY
+        value: ic-gateway-relay:8081
+      - key: UPSTREAM_LITELLM
+        value: ic-gateway-litellm:4000
+      - key: UPSTREAM_ADMIN
+        value: ic-gateway-admin-ui:3000
+
+  # ─── Relay (Rust, subscription tokens) ────────────────────────────────
+  - type: pserv                # private service — only reachable inside the Render VPC
+    name: ic-gateway-relay
+    runtime: docker
+    rootDir: gateway/services/relay
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    envVars:
+      - key: RELAY_BIND_ADDR
+        value: 0.0.0.0:8081
+      - key: GATEWAY_ORG_ID
+        sync: false            # set by admin in Render dashboard
+      - key: GATEWAY_MASTER_KEY
+        generateValue: true    # Render auto-generates a secure random value
+      - key: JWKS_URL
+        value: https://app.inchambers.ai/.well-known/jwks.json
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ic-gateway-postgres
+          property: connectionString
+      - key: ENABLE_REMOTE_REVOCATION_CHECK
+        value: "false"
+      - key: RUST_LOG
+        value: ic_gateway_relay=info,tower_http=info
+
+  # ─── LiteLLM (API-key providers) ──────────────────────────────────────
+  - type: pserv
+    name: ic-gateway-litellm
+    runtime: docker
+    rootDir: gateway/services/litellm
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    envVars:
+      - key: GATEWAY_ORG_ID
+        fromService:
+          type: pserv
+          name: ic-gateway-relay
+          envVarKey: GATEWAY_ORG_ID
+      - key: JWKS_URL
+        value: https://app.inchambers.ai/.well-known/jwks.json
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ic-gateway-postgres
+          property: connectionString
+      - key: LITELLM_MASTER_KEY
+        generateValue: true
+      - key: OPENROUTER_API_KEY
+        sync: false            # optional — admin sets in dashboard to enable API-key path
+      - key: AZURE_FOUNDRY_URL
+        sync: false
+      - key: AZURE_FOUNDRY_KEY
+        sync: false
+
+  # ─── Admin UI (React) ─────────────────────────────────────────────────
+  - type: pserv
+    name: ic-gateway-admin-ui
+    runtime: docker
+    rootDir: gateway/admin-ui
+    dockerfilePath: ./Dockerfile
+    plan: starter
+
+  # (No Redis — relay rate-limits in-memory.)

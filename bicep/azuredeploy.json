@@ -1,0 +1,320 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.42.1.51946",
+      "templateHash": "14943011107007122294"
+    }
+  },
+  "parameters": {
+    "name": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 20,
+      "metadata": {
+        "description": "Short name prefix for all resources (lowercase, 3-20 chars)."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Azure region."
+      }
+    },
+    "vmSize": {
+      "type": "string",
+      "defaultValue": "Standard_B2s",
+      "allowedValues": [
+        "Standard_B1s",
+        "Standard_B2s",
+        "Standard_B2ms",
+        "Standard_B4ms"
+      ],
+      "metadata": {
+        "description": "VM size. B2s (2 vCPU, 4 GB, ~$30/mo) is the default; B2ms (2 vCPU, 8 GB) for heavier load; B1s (1 vCPU, 1 GB, ~$8/mo) for tiny firms."
+      }
+    },
+    "orgId": {
+      "type": "string",
+      "metadata": {
+        "description": "inchambers.ai org UUID this gateway serves."
+      }
+    },
+    "gatewayDomain": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Public hostname the gateway will be reachable at. Must point to the VM's public IP for Let's Encrypt certs. Leave empty to use the VM's Azure-assigned DNS name."
+      }
+    },
+    "adminEmail": {
+      "type": "string",
+      "metadata": {
+        "description": "Email for Let's Encrypt cert registration."
+      }
+    },
+    "sshPublicKey": {
+      "type": "string",
+      "metadata": {
+        "description": "SSH public key (paste contents of ~/.ssh/id_rsa.pub or id_ed25519.pub)."
+      }
+    },
+    "gatewayMasterKey": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Base64-encoded 32-byte master key for encrypting subscription cookies at rest. Generate: openssl rand -base64 32"
+      }
+    },
+    "litellmMasterKey": {
+      "type": "securestring",
+      "metadata": {
+        "description": "LiteLLM admin key (random secret). Generate: \"sk-$(openssl rand -hex 24)\""
+      }
+    },
+    "openRouterApiKey": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional OpenRouter API key. Leave empty to configure later via the admin UI."
+      }
+    },
+    "foundryUrl": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional Azure AI Foundry resource URL."
+      }
+    },
+    "foundryKey": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional Azure AI Foundry API key."
+      }
+    },
+    "allowedOrigin": {
+      "type": "string",
+      "defaultValue": "https://app.inchambers.ai",
+      "metadata": {
+        "description": "Browser origin allowed to call the gateway."
+      }
+    },
+    "jwksUrl": {
+      "type": "string",
+      "defaultValue": "https://app.inchambers.ai/.well-known/jwks.json",
+      "metadata": {
+        "description": "JWKS URL for validating inchambers.ai JWTs."
+      }
+    },
+    "imageRegistry": {
+      "type": "string",
+      "defaultValue": "ghcr.io/inchambers-ai",
+      "metadata": {
+        "description": "Container registry + tag. Default pulls public images from GHCR; override for BYO-registry deployments."
+      }
+    },
+    "imageTag": {
+      "type": "string",
+      "defaultValue": "latest",
+      "metadata": {
+        "description": "Gateway image tag. Pin to a specific version for production; `latest` tracks the stable release."
+      }
+    }
+  },
+  "variables": {
+    "cloudInit": "#cloud-config\npackage_update: true\npackage_upgrade: true\npackages:\n  - ca-certificates\n  - curl\n  - gnupg\nruncmd:\n  - curl -fsSL https://get.docker.com | sh\n  - usermod -aG docker azureuser\n  - mkdir -p /opt/inchambers-gateway/caddy\n  - curl -fsSL https://raw.githubusercontent.com/inchambers-ai/gateway-deploy/main/docker-compose.yaml -o /opt/inchambers-gateway/docker-compose.yaml\n  - curl -fsSL https://raw.githubusercontent.com/inchambers-ai/gateway-deploy/main/caddy/Caddyfile -o /opt/inchambers-gateway/caddy/Caddyfile\n  - curl -fsSL https://raw.githubusercontent.com/inchambers-ai/gateway-deploy/main/caddy/Caddyfile.notls -o /opt/inchambers-gateway/caddy/Caddyfile.notls\n  - |\n    cat > /opt/inchambers-gateway/.env <<ENV\n    GATEWAY_ORG_ID=__ORG_ID__\n    GATEWAY_DOMAIN=__GATEWAY_DOMAIN__\n    CADDY_TLS_MODE=auto\n    CADDY_ACME_EMAIL=__ADMIN_EMAIL__\n    ALLOWED_ORIGIN=__ALLOWED_ORIGIN__\n    JWKS_URL=__JWKS_URL__\n    GATEWAY_MASTER_KEY=__GATEWAY_MASTER_KEY__\n    LITELLM_MASTER_KEY=__LITELLM_MASTER_KEY__\n    OPENROUTER_API_KEY=__OPENROUTER_API_KEY__\n    AZURE_FOUNDRY_URL=__AZURE_FOUNDRY_URL__\n    AZURE_FOUNDRY_KEY=__AZURE_FOUNDRY_KEY__\n    PG_PASSWORD=__PG_PASSWORD__\n    REGISTRY=__IMAGE_REGISTRY__\n    IMAGE_TAG=__IMAGE_TAG__\n    ENV\n  - chmod 600 /opt/inchambers-gateway/.env\n  - chown -R azureuser:azureuser /opt/inchambers-gateway\n  - cd /opt/inchambers-gateway && docker compose pull && docker compose up -d\n"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2023-11-01",
+      "name": "[format('{0}-pip', parameters('name'))]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static",
+        "dnsSettings": {
+          "domainNameLabel": "[toLower(parameters('name'))]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2023-11-01",
+      "name": "[format('{0}-nsg', parameters('name'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "AllowSsh",
+            "properties": {
+              "priority": 1000,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "*",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "22"
+            }
+          },
+          {
+            "name": "AllowHttp",
+            "properties": {
+              "priority": 1010,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "*",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "80"
+            }
+          },
+          {
+            "name": "AllowHttps",
+            "properties": {
+              "priority": 1020,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "*",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "443"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2023-11-01",
+      "name": "[format('{0}-vnet', parameters('name'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "10.50.0.0/16"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "default",
+            "properties": {
+              "addressPrefix": "10.50.1.0/24",
+              "networkSecurityGroup": {
+                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-nsg', parameters('name')))]"
+              }
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-nsg', parameters('name')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2023-11-01",
+      "name": "[format('{0}-nic', parameters('name'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "subnet": {
+                "id": "[format('{0}/subnets/default', resourceId('Microsoft.Network/virtualNetworks', format('{0}-vnet', parameters('name'))))]"
+              },
+              "privateIPAllocationMethod": "Dynamic",
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', format('{0}-pip', parameters('name')))]"
+              }
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/publicIPAddresses', format('{0}-pip', parameters('name')))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', format('{0}-vnet', parameters('name')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}-vm', parameters('name'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "Canonical",
+            "offer": "ubuntu-24_04-lts",
+            "sku": "server",
+            "version": "latest"
+          },
+          "osDisk": {
+            "createOption": "FromImage",
+            "managedDisk": {
+              "storageAccountType": "StandardSSD_LRS"
+            },
+            "diskSizeGB": 32
+          }
+        },
+        "osProfile": {
+          "computerName": "[replace(parameters('name'), '-', '')]",
+          "adminUsername": "azureuser",
+          "customData": "[base64(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(variables('cloudInit'), '__ORG_ID__', parameters('orgId')), '__GATEWAY_DOMAIN__', if(empty(parameters('gatewayDomain')), reference(resourceId('Microsoft.Network/publicIPAddresses', format('{0}-pip', parameters('name'))), '2023-11-01').dnsSettings.fqdn, parameters('gatewayDomain'))), '__ADMIN_EMAIL__', parameters('adminEmail')), '__ALLOWED_ORIGIN__', parameters('allowedOrigin')), '__JWKS_URL__', parameters('jwksUrl')), '__GATEWAY_MASTER_KEY__', parameters('gatewayMasterKey')), '__LITELLM_MASTER_KEY__', parameters('litellmMasterKey')), '__OPENROUTER_API_KEY__', parameters('openRouterApiKey')), '__AZURE_FOUNDRY_URL__', parameters('foundryUrl')), '__AZURE_FOUNDRY_KEY__', parameters('foundryKey')), '__PG_PASSWORD__', uniqueString(resourceGroup().id, parameters('name'), 'pg')), '__IMAGE_REGISTRY__', parameters('imageRegistry')), '__IMAGE_TAG__', parameters('imageTag')))]",
+          "linuxConfiguration": {
+            "disablePasswordAuthentication": true,
+            "ssh": {
+              "publicKeys": [
+                {
+                  "path": "/home/azureuser/.ssh/authorized_keys",
+                  "keyData": "[parameters('sshPublicKey')]"
+                }
+              ]
+            }
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', format('{0}-nic', parameters('name')))]"
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', format('{0}-nic', parameters('name')))]",
+        "[resourceId('Microsoft.Network/publicIPAddresses', format('{0}-pip', parameters('name')))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "gatewayUrl": {
+      "type": "string",
+      "value": "[format('https://{0}', if(empty(parameters('gatewayDomain')), reference(resourceId('Microsoft.Network/publicIPAddresses', format('{0}-pip', parameters('name'))), '2023-11-01').dnsSettings.fqdn, parameters('gatewayDomain')))]"
+    },
+    "publicIp": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Network/publicIPAddresses', format('{0}-pip', parameters('name'))), '2023-11-01').ipAddress]"
+    },
+    "sshCommand": {
+      "type": "string",
+      "value": "[format('ssh azureuser@{0}', reference(resourceId('Microsoft.Network/publicIPAddresses', format('{0}-pip', parameters('name'))), '2023-11-01').ipAddress)]"
+    },
+    "dnsHint": {
+      "type": "string",
+      "value": "[if(empty(parameters('gatewayDomain')), format('Using Azure-assigned DNS: {0}. First curl after boot may take ~2 min for Docker pull + cold start.', reference(resourceId('Microsoft.Network/publicIPAddresses', format('{0}-pip', parameters('name'))), '2023-11-01').dnsSettings.fqdn), format('Point DNS: {0} → {1}. Let''s Encrypt provisions the cert on first HTTPS request.', parameters('gatewayDomain'), reference(resourceId('Microsoft.Network/publicIPAddresses', format('{0}-pip', parameters('name'))), '2023-11-01').ipAddress))]"
+    }
+  }
+}

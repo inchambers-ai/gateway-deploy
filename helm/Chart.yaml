@@ -1,0 +1,16 @@
+apiVersion: v2
+name: ic-gateway
+description: inchambers.ai Gateway — unified self-hosted AI gateway for law firms.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+icon: https://inchambers.ai/logo.png
+keywords:
+  - ai
+  - legal
+  - openai
+  - anthropic
+  - litellm
+home: https://inchambers.ai
+sources:
+  - https://github.com/inchambers-ai/gateway

@@ -1,0 +1,263 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  inchambers-gateway — single EC2 VM running docker-compose.
+
+  Mirrors the Azure VM Bicep pattern: one t4g.small (ARM, 2 vCPU, 2 GiB)
+  on Amazon Linux 2023 with cloud-init that installs Docker, pulls the
+  compose bundle from the public inchambers-ai/gateway-deploy repo,
+  renders .env from the stack parameters, and starts the stack.
+
+  Cost at default size: ~$12/mo (t4g.small) + ~$2/mo (20 GB gp3) +
+  egress (first 100 GB free).
+
+  One-click: the inchambers.ai dashboard's "Deploy to AWS" button
+  redirects to CFN QuickCreate with templateURL pointing at the copy of
+  this file in the public deploy repo and param_OrgId pre-filled.
+
+Parameters:
+  Name:
+    Type: String
+    Default: ic-gateway
+    Description: Short prefix for all resource names.
+    AllowedPattern: '^[a-z][a-z0-9-]{1,20}$'
+
+  OrgId:
+    Type: String
+    Description: The inchambers.ai org UUID this gateway serves.
+    AllowedPattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+  AdminEmail:
+    Type: String
+    Description: Email for Let's Encrypt cert registration.
+    AllowedPattern: '^[^\s@]+@[^\s@]+\.[^\s@]+$'
+
+  SSHKeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 key pair for SSH access.
+
+  GatewayDomain:
+    Type: String
+    Default: ''
+    Description: Public hostname the gateway will serve. Leave empty to use AWS-assigned DNS (Let's Encrypt won't issue for *.amazonaws.com — set a real domain for HTTPS).
+
+  GatewayMasterKey:
+    Type: String
+    NoEcho: true
+    Description: 32 random bytes, base64 — `openssl rand -base64 32`.
+    MinLength: 40
+
+  LitellmMasterKey:
+    Type: String
+    NoEcho: true
+    Description: LiteLLM admin key — e.g. `sk-$(openssl rand -hex 24)`.
+    MinLength: 8
+
+  OpenRouterApiKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Optional. Paste your OpenRouter key to enable API-key providers. Configure later via the admin UI if empty.
+
+  AllowedOrigin:
+    Type: String
+    Default: https://app.inchambers.ai
+    Description: Browser origin allowed to call the gateway.
+
+  ImageRegistry:
+    Type: String
+    Default: ghcr.io/inchambers-ai
+    Description: Container image registry.
+
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Gateway image tag. Pin to a version for production.
+
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedValues:
+      - t4g.micro
+      - t4g.small
+      - t4g.medium
+      - t4g.large
+    Description: Instance size. t4g.small ($12/mo) is the default; bump up for heavier load.
+
+  LatestAmiId:
+    # Resolves at deploy time to the latest Amazon Linux 2023 ARM AMI in
+    # whichever region the stack is deployed to. No per-region map needed.
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: 'Do not change unless you need to pin to a specific AMI.'
+
+  VpcCidr:
+    Type: String
+    Default: 10.60.0.0/16
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+    Description: VPC CIDR.
+
+  SubnetCidr:
+    Type: String
+    Default: 10.60.1.0/24
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+    Description: Public subnet CIDR.
+
+Conditions:
+  HasCustomDomain: !Not [ !Equals [ !Ref GatewayDomain, '' ] ]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub '${Name}-vpc' }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub '${Name}-igw' }
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref SubnetCidr
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      Tags:
+        - { Key: Name, Value: !Sub '${Name}-subnet' }
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${Name}-rt' }
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref RouteTable
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: inchambers-gateway inbound
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22,  ToPort: 22,  CidrIp: 0.0.0.0/0, Description: SSH }
+        - { IpProtocol: tcp, FromPort: 80,  ToPort: 80,  CidrIp: 0.0.0.0/0, Description: HTTP }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS }
+      Tags:
+        - { Key: Name, Value: !Sub '${Name}-sg' }
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${Name}-eip' }
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref SSHKeyName
+      SubnetId: !Ref Subnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            DeleteOnTermination: true
+            Encrypted: true
+      Tags:
+        - { Key: Name, Value: !Sub '${Name}-vm' }
+      UserData:
+        Fn::Base64: !Sub |
+          #cloud-config
+          package_update: true
+          package_upgrade: true
+          runcmd:
+            - dnf install -y docker
+            - systemctl enable --now docker
+            - usermod -aG docker ec2-user
+            # Install docker-compose v2 plugin via the stable convenience
+            # package (Amazon Linux 2023 doesn't ship it with docker).
+            - mkdir -p /usr/local/lib/docker/cli-plugins
+            - curl -fsSL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m) -o /usr/local/lib/docker/cli-plugins/docker-compose
+            - chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+            # Fetch the public deploy bundle.
+            - mkdir -p /opt/inchambers-gateway/caddy
+            - curl -fsSL https://raw.githubusercontent.com/inchambers-ai/gateway-deploy/main/docker-compose.yaml -o /opt/inchambers-gateway/docker-compose.yaml
+            - curl -fsSL https://raw.githubusercontent.com/inchambers-ai/gateway-deploy/main/caddy/Caddyfile       -o /opt/inchambers-gateway/caddy/Caddyfile
+            - curl -fsSL https://raw.githubusercontent.com/inchambers-ai/gateway-deploy/main/caddy/Caddyfile.notls -o /opt/inchambers-gateway/caddy/Caddyfile.notls
+            - |
+              cat > /opt/inchambers-gateway/.env <<'ENV'
+              GATEWAY_ORG_ID=${OrgId}
+              GATEWAY_DOMAIN=${GatewayDomain}
+              CADDY_TLS_MODE=auto
+              CADDY_ACME_EMAIL=${AdminEmail}
+              ALLOWED_ORIGIN=${AllowedOrigin}
+              JWKS_URL=https://app.inchambers.ai/.well-known/jwks.json
+              GATEWAY_MASTER_KEY=${GatewayMasterKey}
+              LITELLM_MASTER_KEY=${LitellmMasterKey}
+              OPENROUTER_API_KEY=${OpenRouterApiKey}
+              PG_PASSWORD=${AWS::StackId}
+              REGISTRY=${ImageRegistry}
+              IMAGE_TAG=${ImageTag}
+              ENV
+            - chmod 600 /opt/inchambers-gateway/.env
+            - chown -R ec2-user:ec2-user /opt/inchambers-gateway
+            - cd /opt/inchambers-gateway && docker compose pull && docker compose up -d
+
+  EipAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref Instance
+      AllocationId: !GetAtt ElasticIp.AllocationId
+
+Outputs:
+  PublicIp:
+    Description: Public IPv4 of the gateway VM.
+    Value: !Ref ElasticIp
+
+  GatewayUrl:
+    Description: URL to paste into inchambers.ai → Org Admin → AI Platform → Gateway URL.
+    Value: !If
+      - HasCustomDomain
+      - !Sub 'https://${GatewayDomain}'
+      - !Sub 'http://${ElasticIp}'
+
+  SshCommand:
+    Description: SSH command to connect to the gateway VM.
+    Value: !Sub 'ssh -i ~/.ssh/${SSHKeyName}.pem ec2-user@${ElasticIp}'
+
+  DnsHint:
+    Description: Next step for DNS / TLS.
+    Value: !If
+      - HasCustomDomain
+      - !Sub 'Point DNS: ${GatewayDomain} → ${ElasticIp}. Let''s Encrypt provisions the cert on first HTTPS request.'
+      - !Sub 'Using the raw IP; set a real domain via GatewayDomain to get HTTPS.'
