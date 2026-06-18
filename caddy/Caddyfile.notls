@@ -43,9 +43,17 @@
 		reverse_proxy {$UPSTREAM_RELAY:relay:8081}
 	}
 
-	handle_path /admin {
-		redir /admin/ permanent
-	}
+	# Humans visiting the bare domain or /admin (no trailing slash) land on the
+	# console at /admin/. The admin-ui is a Vite SPA built with base "/admin/",
+	# so it only initialises correctly under that directory. `redir` runs before
+	# `handle` in Caddy's directive order, so these fire first. AI clients use
+	# /v1/*, /health, /anthropic/*, /subscription/* — never the bare root — so
+	# redirecting `/` is safe for them.
+	@gw_root path /
+	redir @gw_root /admin/ permanent
+
+	@admin_noslash path /admin
+	redir @admin_noslash /admin/ permanent
 
 	handle /admin/* {
 		route {
