@@ -7,22 +7,32 @@
 }
 
 :80 {
-    @cors_preflight method OPTIONS
-    handle @cors_preflight {
-        header Access-Control-Allow-Origin "{$ALLOWED_ORIGIN:https://app.inchambers.ai}"
-        header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
-        header Access-Control-Allow-Headers "Authorization, Content-Type, X-IC-Client"
-        header Access-Control-Max-Age "86400"
-        respond "" 204
-    }
-
-    header {
-        Access-Control-Allow-Origin "{$ALLOWED_ORIGIN:https://app.inchambers.ai}"
-        Access-Control-Expose-Headers "X-Request-Id, Retry-After"
-    }
+    # CORS is owned by the relay (tower-http CorsLayer → `*` on every
+    # response incl. OPTIONS preflight and errors), which satisfies the
+    # Claude for M365 third-party-gateway requirement (Access-Control-
+    # Allow-Origin: * / Access-Control-Allow-Headers: *). Caddy does NOT
+    # inject its own CORS headers here — a second Access-Control-Allow-Origin
+    # would be a duplicate the browser rejects.
 
     handle /health {
         respond "ok" 200
+    }
+
+    # Anthropic Messages surface for official Claude clients (Claude for
+    # M365 "Enterprise gateway", Claude Code, Claude Desktop): bare
+    # /v1/messages, /v1/messages/count_tokens, and /v1/models → relay.
+    handle /v1/messages* {
+        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+            flush_interval -1
+            transport http {
+                read_timeout 3600s
+                write_timeout 3600s
+            }
+        }
+    }
+
+    handle /v1/models {
+        reverse_proxy {$UPSTREAM_RELAY:relay:8081}
     }
 
     handle_path /admin {
@@ -49,6 +59,16 @@
         }
     }
 
+    handle /api/tools/* {
+        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+            flush_interval -1
+            transport http {
+                read_timeout 3600s
+                write_timeout 3600s
+            }
+        }
+    }
+
     handle /anthropic/* {
         reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
             flush_interval -1
@@ -59,8 +79,10 @@
         }
     }
 
+    # Everything else (incl. bare /v1/chat/completions) → the Rust relay.
+    # The relay is the only backend; LiteLLM was removed.
     handle {
-        reverse_proxy {$UPSTREAM_LITELLM:litellm:4000} {
+        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
             flush_interval -1
             transport http {
                 read_timeout 3600s

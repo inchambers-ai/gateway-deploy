@@ -4,12 +4,14 @@
 #   /admin/*              → admin-ui container (SPA)
 #   /admin-api/*          → relay (admin endpoints; prefix rewritten to /admin/*)
 #   /subscription/*       → relay (subscription-model chat completions)
+#   /v1/messages*, /v1/models → relay (Anthropic Messages surface for official
+#                            Claude clients: Claude for M365, Claude Code)
 #   /anthropic/v1/*       → relay (native Anthropic Messages API passthrough)
-#   anything else         → LiteLLM (API-key provider routing)
+#   anything else         → relay (the relay is the only backend)
 #
 # Upstream hostnames are pulled from env so the same Caddyfile works on
-# docker-compose (service names `relay`, `litellm`, `admin-ui`) and on
-# Kubernetes / Container Apps (fully-qualified service DNS passed in).
+# docker-compose (service names `relay`, `admin-ui`) and on Kubernetes /
+# Container Apps (fully-qualified service DNS passed in).
 
 {
     email {$CADDY_ACME_EMAIL:admin@inchambers.ai}
@@ -18,24 +20,28 @@
 {$GATEWAY_DOMAIN:localhost} {
     tls {$CADDY_TLS_ISSUER:internal}
 
-    # CORS preflight — match on method; Caddy's header matcher can't glob
-    # values, so we only assert the method here.
-    @cors_preflight method OPTIONS
-    handle @cors_preflight {
-        header Access-Control-Allow-Origin "{$ALLOWED_ORIGIN:https://app.inchambers.ai}"
-        header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
-        header Access-Control-Allow-Headers "Authorization, Content-Type, X-IC-Client"
-        header Access-Control-Max-Age "86400"
-        respond "" 204
-    }
-
-    header {
-        Access-Control-Allow-Origin "{$ALLOWED_ORIGIN:https://app.inchambers.ai}"
-        Access-Control-Expose-Headers "X-Request-Id, Retry-After"
-    }
+    # CORS is owned by the relay (tower-http CorsLayer → `*` on every response
+    # incl. OPTIONS and errors), satisfying the Claude for M365 third-party-
+    # gateway requirement. Caddy does NOT inject CORS — a duplicate
+    # Access-Control-Allow-Origin would be rejected by the browser.
 
     handle /health {
         respond "ok" 200
+    }
+
+    # Anthropic Messages surface for official Claude clients.
+    handle /v1/messages* {
+        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+            flush_interval -1
+            transport http {
+                read_timeout 3600s
+                write_timeout 3600s
+            }
+        }
+    }
+
+    handle /v1/models {
+        reverse_proxy {$UPSTREAM_RELAY:relay:8081}
     }
 
     handle_path /admin {
@@ -66,6 +72,17 @@
         }
     }
 
+    # Built-in server-side tools (web_fetch / google_search / scc-*).
+    handle /api/tools/* {
+        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+            flush_interval -1
+            transport http {
+                read_timeout 3600s
+                write_timeout 3600s
+            }
+        }
+    }
+
     # Native Anthropic Messages API passthrough.
     handle /anthropic/* {
         reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
@@ -77,9 +94,9 @@
         }
     }
 
-    # Default: LiteLLM for API-key providers.
+    # Everything else (incl. bare /v1/chat/completions) → the Rust relay.
     handle {
-        reverse_proxy {$UPSTREAM_LITELLM:litellm:4000} {
+        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
             flush_interval -1
             transport http {
                 read_timeout 3600s
