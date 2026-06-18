@@ -27,9 +27,11 @@
 	}
 
 	# Anthropic Messages surface for official Claude clients (Claude for
-	# M365 "Enterprise gateway", Claude Code, Claude Desktop): bare
-	# /v1/messages, /v1/messages/count_tokens, and /v1/models → relay.
-	handle /v1/messages* {
+	# M365 "Enterprise gateway", Claude Code, Claude Desktop): the whole bare
+	# /v1/* surface (/v1/messages, /v1/messages/count_tokens, /v1/models,
+	# /v1/chat/completions) → relay. Must be explicit because the catch-all
+	# below now serves the admin console (not the relay).
+	handle /v1/* {
 		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
 			flush_interval -1
 			transport http {
@@ -39,28 +41,10 @@
 		}
 	}
 
-	handle /v1/models {
-		reverse_proxy {$UPSTREAM_RELAY:relay:8081}
-	}
-
-	# Humans visiting the bare domain or /admin (no trailing slash) land on the
-	# console at /admin/. The admin-ui is a Vite SPA built with base "/admin/",
-	# so it only initialises correctly under that directory. `redir` runs before
-	# `handle` in Caddy's directive order, so these fire first. AI clients use
-	# /v1/*, /health, /anthropic/*, /subscription/* — never the bare root — so
-	# redirecting `/` is safe for them.
-	@gw_root path /
-	redir @gw_root /admin/ permanent
-
-	@admin_noslash path /admin
-	redir @admin_noslash /admin/ permanent
-
-	handle /admin/* {
-		route {
-			respond @admin_blocked "Forbidden" 403
-			reverse_proxy {$UPSTREAM_ADMIN:admin-ui:3000}
-		}
-	}
+	# The console used to live under /admin/; it's now at the gateway root.
+	# Redirect legacy /admin and /admin/* links to /.
+	@admin_legacy path /admin /admin/*
+	redir @admin_legacy / permanent
 
 	handle /admin-api/* {
 		request_body {
@@ -104,15 +88,14 @@
 		}
 	}
 
-	# Everything else (incl. bare /v1/chat/completions) → the Rust relay.
-	# The relay is the only backend; LiteLLM was removed.
+	# Everything else → the admin console SPA at the gateway root (/, /assets/*,
+	# client-side routes). All relay/API paths are matched above, so only the UI
+	# reaches here. Optional IP allowlist applies to the console, not the AI
+	# surface (which Claude clients hit from anywhere).
 	handle {
-		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
-			flush_interval -1
-			transport http {
-				read_timeout 3600s
-				write_timeout 3600s
-			}
+		route {
+			respond @admin_blocked "Forbidden" 403
+			reverse_proxy {$UPSTREAM_ADMIN:admin-ui:3000}
 		}
 	}
 
