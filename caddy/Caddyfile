@@ -26,6 +26,9 @@
     # Access-Control-Allow-Origin would be rejected by the browser.
 
     handle /health {
+        # CORS so the inchambers add-in can probe this cross-origin to detect
+        # whether a gateway exists at gateway.<firm-domain> (convention routing).
+        header Access-Control-Allow-Origin "*"
         respond "ok" 200
     }
 
