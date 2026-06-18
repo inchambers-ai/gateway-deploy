@@ -22,6 +22,12 @@ readonly REPO_RAW="https://raw.githubusercontent.com/inchambers-ai/inchambers/${
 readonly INSTALL_DIR="${IC_GATEWAY_DIR:-/opt/inchambers-gateway}"
 readonly IMAGE_REGISTRY="${IC_GATEWAY_REGISTRY:-ghcr.io/inchambers-ai}"
 readonly IMAGE_TAG="${IC_GATEWAY_TAG:-latest}"
+# Optional supply-chain integrity check: a URL to a `sha256sum`-format file
+# covering the fetched bundle (docker-compose.yaml, Caddyfile, Caddyfile.notls).
+# When set, each downloaded file is verified against it and the install aborts
+# on mismatch. When unset, a warning is printed. Pin IC_GATEWAY_BRANCH to a tag
+# and host the sums alongside the release for a fully verified install.
+readonly SHA256SUMS_URL="${IC_GATEWAY_SHA256SUMS_URL:-}"
 
 C_BOLD=$(printf '\033[1m'); C_DIM=$(printf '\033[2m'); C_GREEN=$(printf '\033[32m')
 C_YELLOW=$(printf '\033[33m'); C_RED=$(printf '\033[31m'); C_RESET=$(printf '\033[0m')
@@ -74,6 +80,18 @@ collect_inputs() {
   prompt_secret OPENROUTER_API_KEY "OpenRouter API key (optional — hit Enter to skip)" || true
   echo
 
+  # Validate untrusted inputs before they reach the (shell-expanding) heredoc
+  # in write_env, so a value like `$(...)` / backticks can't be executed.
+  local uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+  [[ "$GATEWAY_ORG_ID" =~ $uuid_re ]] || die "org UUID '${GATEWAY_ORG_ID}' is malformed"
+  [[ "$GATEWAY_DOMAIN" =~ ^[a-zA-Z0-9.-]+$ ]] || die "domain '${GATEWAY_DOMAIN}' is not a valid hostname"
+  local v
+  for v in CADDY_ACME_EMAIL ALLOWED_ORIGIN OPENROUTER_API_KEY; do
+    case "${!v}" in
+      *'$'* | *'`'*) die "$v contains an illegal character (\$ or backtick)" ;;
+    esac
+  done
+
   GATEWAY_MASTER_KEY="$(openssl rand -base64 32)"
   LITELLM_MASTER_KEY="sk-$(openssl rand -hex 24)"
   PG_PASSWORD="$(openssl rand -base64 24 | tr -d '=+/' | cut -c1-24)"
@@ -83,10 +101,29 @@ collect_inputs() {
 }
 
 # ─── Install ───────────────────────────────────────────────────────────────
+
+# Pick an available sha256 tool (Linux: sha256sum, macOS: shasum -a 256).
+_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else die "no sha256 tool (sha256sum/shasum) available for integrity check"; fi
+}
+
 fetch_compose_files() {
   log "Fetching compose bundle to ${INSTALL_DIR}"
   sudo mkdir -p "${INSTALL_DIR}/caddy"
   sudo chown "$(id -u):$(id -g)" "${INSTALL_DIR}" "${INSTALL_DIR}/caddy"
+
+  # Optionally fetch the checksum manifest for integrity verification.
+  local sums=""
+  if [[ -n "$SHA256SUMS_URL" ]]; then
+    sums="$(mktemp)"
+    curl -fsSL "$SHA256SUMS_URL" -o "$sums" || die "failed to fetch SHA256SUMS from ${SHA256SUMS_URL}"
+    log "Will verify downloads against ${SHA256SUMS_URL}"
+  else
+    warn "IC_GATEWAY_SHA256SUMS_URL not set — downloaded bundle is NOT integrity-verified."
+    warn "For a verified install, pin IC_GATEWAY_BRANCH to a release tag and set IC_GATEWAY_SHA256SUMS_URL."
+  fi
 
   local files=(
     "deploy/docker-compose/docker-compose.yaml"
@@ -98,7 +135,18 @@ fetch_compose_files() {
     # Flatten: put Caddyfile/Caddyfile.notls under ./caddy/ relative to compose
     mkdir -p "$(dirname "$out")"
     curl -fsSL "${REPO_RAW}/${f}" -o "$out" || die "failed to fetch ${f}"
+    if [[ -n "$sums" ]]; then
+      local want got base
+      base="$(basename "$out")"
+      # Match the basename in the sums manifest (works regardless of path form).
+      want="$(awk -v b="$base" '$2 ~ b {print $1; exit}' "$sums")"
+      [[ -n "$want" ]] || die "no checksum for ${base} in the SHA256SUMS manifest"
+      got="$(_sha256 "$out")"
+      [[ "$want" == "$got" ]] || die "checksum mismatch for ${base} (expected ${want}, got ${got})"
+      hint "verified ${base}"
+    fi
   done
+  [[ -n "$sums" ]] && rm -f "$sums"
 }
 
 write_env() {

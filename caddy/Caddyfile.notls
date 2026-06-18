@@ -1,102 +1,116 @@
 # Plain-HTTP Caddy config used when the deployment terminates TLS upstream
 # (ALB, Cloud Run, Azure Container Apps, an Ingress controller, etc.).
 # Caddy listens on :80 only; no ACME, no internal CA, no `tls` directive.
-
 {
-    auto_https off
+	auto_https off
 }
 
 :80 {
-    # CORS is owned by the relay (tower-http CorsLayer → `*` on every
-    # response incl. OPTIONS preflight and errors), which satisfies the
-    # Claude for M365 third-party-gateway requirement (Access-Control-
-    # Allow-Origin: * / Access-Control-Allow-Headers: *). Caddy does NOT
-    # inject its own CORS headers here — a second Access-Control-Allow-Origin
-    # would be a duplicate the browser rejects.
+	# Optional defense-in-depth IP allowlist for the admin console. Unset
+	# ADMIN_ALLOW_CIDRS defaults to all IPs (matcher never fires → behavior
+	# unchanged). Behind nginx/an LB, `remote_ip` is the proxy peer — do the
+	# admin IP restriction at that upstream layer instead.
+	@admin_blocked not remote_ip {$ADMIN_ALLOW_CIDRS:0.0.0.0/0 ::/0}
 
-    handle /health {
-        # CORS so the inchambers add-in can probe this cross-origin to detect
-        # whether a gateway exists at gateway.<firm-domain> (convention routing).
-        header Access-Control-Allow-Origin "*"
-        respond "ok" 200
-    }
+	# CORS is owned by the relay (tower-http CorsLayer → `*` on every
+	# response incl. OPTIONS preflight and errors), which satisfies the
+	# Claude for M365 third-party-gateway requirement (Access-Control-
+	# Allow-Origin: * / Access-Control-Allow-Headers: *). Caddy does NOT
+	# inject its own CORS headers here — a second Access-Control-Allow-Origin
+	# would be a duplicate the browser rejects.
 
-    # Anthropic Messages surface for official Claude clients (Claude for
-    # M365 "Enterprise gateway", Claude Code, Claude Desktop): bare
-    # /v1/messages, /v1/messages/count_tokens, and /v1/models → relay.
-    handle /v1/messages* {
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
-            flush_interval -1
-            transport http {
-                read_timeout 3600s
-                write_timeout 3600s
-            }
-        }
-    }
+	handle /health {
+		# CORS so the inchambers add-in can probe this cross-origin to detect
+		# whether a gateway exists at gateway.<firm-domain> (convention routing).
+		header Access-Control-Allow-Origin "*"
+		respond "ok" 200
+	}
 
-    handle /v1/models {
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081}
-    }
+	# Anthropic Messages surface for official Claude clients (Claude for
+	# M365 "Enterprise gateway", Claude Code, Claude Desktop): bare
+	# /v1/messages, /v1/messages/count_tokens, and /v1/models → relay.
+	handle /v1/messages* {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
 
-    handle_path /admin {
-        redir /admin/ permanent
-    }
+	handle /v1/models {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081}
+	}
 
-    handle /admin/* {
-        reverse_proxy {$UPSTREAM_ADMIN:admin-ui:3000}
-    }
+	handle_path /admin {
+		redir /admin/ permanent
+	}
 
-    handle /admin-api/* {
-        uri replace /admin-api/ /admin/
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081}
-    }
+	handle /admin/* {
+		route {
+			respond @admin_blocked "Forbidden" 403
+			reverse_proxy {$UPSTREAM_ADMIN:admin-ui:3000}
+		}
+	}
 
-    handle /subscription/* {
-        uri strip_prefix /subscription
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
-            flush_interval -1
-            transport http {
-                read_timeout 3600s
-                write_timeout 3600s
-            }
-        }
-    }
+	handle /admin-api/* {
+		request_body {
+			max_size 64KB
+		}
+		route {
+			respond @admin_blocked "Forbidden" 403
+			uri replace /admin-api/ /admin/
+			reverse_proxy {$UPSTREAM_RELAY:relay:8081}
+		}
+	}
 
-    handle /api/tools/* {
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
-            flush_interval -1
-            transport http {
-                read_timeout 3600s
-                write_timeout 3600s
-            }
-        }
-    }
+	handle /subscription/* {
+		uri strip_prefix /subscription
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
 
-    handle /anthropic/* {
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
-            flush_interval -1
-            transport http {
-                read_timeout 3600s
-                write_timeout 3600s
-            }
-        }
-    }
+	handle /api/tools/* {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
 
-    # Everything else (incl. bare /v1/chat/completions) → the Rust relay.
-    # The relay is the only backend; LiteLLM was removed.
-    handle {
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
-            flush_interval -1
-            transport http {
-                read_timeout 3600s
-                write_timeout 3600s
-            }
-        }
-    }
+	handle /anthropic/* {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
 
-    log {
-        output stdout
-        format json
-        level INFO
-    }
+	# Everything else (incl. bare /v1/chat/completions) → the Rust relay.
+	# The relay is the only backend; LiteLLM was removed.
+	handle {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
+
+	log {
+		output stdout
+		format json
+		level INFO
+	}
 }

@@ -23,6 +23,16 @@ spec:
         - name: relay
           image: "{{ .Values.image.registry }}/ic-gateway-relay:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Relay image is distroless-nonroot, writes nothing to disk, and
+          # listens on a high port — so this hardened context is safe.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 8081
           env:

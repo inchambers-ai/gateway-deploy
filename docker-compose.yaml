@@ -7,7 +7,8 @@
 
 services:
   caddy:
-    image: caddy:2-alpine
+    # Pinned by digest (supply chain). To update: re-resolve the tag's digest.
+    image: caddy:2-alpine@sha256:77c07d5ebfa5be9fd6c820d2094ae662c9e7eeb9bf98346b7f639900263ee2a2
     restart: unless-stopped
     ports:
       - "80:80"
@@ -20,24 +21,40 @@ services:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
     environment:
       GATEWAY_DOMAIN: ${GATEWAY_DOMAIN}
       CADDY_TLS_MODE: ${CADDY_TLS_MODE:-auto}
       CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:-admin@inchambers.ai}
       ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-https://app.inchambers.ai}
+      ADMIN_ALLOW_CIDRS: ${ADMIN_ALLOW_CIDRS:-}
     depends_on: [ litellm, relay, admin-ui ]
 
   relay:
     image: ${REGISTRY:-ghcr.io/inchambers-ai}/ic-gateway-relay:${IMAGE_TAG:-latest}
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 512m
+    cpus: 1.0
     environment:
       RELAY_BIND_ADDR: "0.0.0.0:8081"
-      GATEWAY_ORG_ID: ${GATEWAY_ORG_ID}
-      GATEWAY_MASTER_KEY: ${GATEWAY_MASTER_KEY}
+      GATEWAY_ORG_ID: ${GATEWAY_ORG_ID:?set the inchambers org UUID}
+      GATEWAY_MASTER_KEY: ${GATEWAY_MASTER_KEY:?generate with openssl rand -base64 32}
       JWKS_URL: ${JWKS_URL:-https://app.inchambers.ai/.well-known/jwks.json}
-      DATABASE_URL: ${DATABASE_URL:-postgres://gateway:gateway@postgres:5432/gateway}
-      ENABLE_REMOTE_REVOCATION_CHECK: ${ENABLE_REMOTE_REVOCATION_CHECK:-false}
+      DATABASE_URL: ${DATABASE_URL:-postgres://gateway:${PG_PASSWORD}@postgres:5432/gateway}
+      ENABLE_REMOTE_REVOCATION_CHECK: ${ENABLE_REMOTE_REVOCATION_CHECK:-true}
       INCHAMBERS_API: ${INCHAMBERS_API:-https://app.inchambers.ai}
+      GATEWAY_AUTH_MODES: ${GATEWAY_AUTH_MODES:-federated}
+      GATEWAY_BOOTSTRAP_TOKEN: ${GATEWAY_BOOTSTRAP_TOKEN:-}
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
       RUST_LOG: ${RUST_LOG:-ic_gateway_relay=info,tower_http=info}
     depends_on:
       postgres: { condition: service_healthy }
@@ -45,11 +62,13 @@ services:
   litellm:
     image: ${REGISTRY:-ghcr.io/inchambers-ai}/ic-gateway-litellm:${IMAGE_TAG:-latest}
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       GATEWAY_ORG_ID: ${GATEWAY_ORG_ID}
       JWKS_URL: ${JWKS_URL:-https://app.inchambers.ai/.well-known/jwks.json}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
-      DATABASE_URL: ${DATABASE_URL:-postgres://gateway:gateway@postgres:5432/gateway}
+      DATABASE_URL: ${DATABASE_URL:-postgres://gateway:${PG_PASSWORD}@postgres:5432/gateway}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       AZURE_FOUNDRY_URL: ${AZURE_FOUNDRY_URL:-}
       AZURE_FOUNDRY_KEY: ${AZURE_FOUNDRY_KEY:-}
@@ -62,13 +81,21 @@ services:
   admin-ui:
     image: ${REGISTRY:-ghcr.io/inchambers-ai}/ic-gateway-admin-ui:${IMAGE_TAG:-latest}
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    mem_limit: 512m
     environment:
       POSTGRES_USER: gateway
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-gateway}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?generate with openssl rand -hex 16}
       POSTGRES_DB: gateway
     volumes:
       - postgres-data:/var/lib/postgresql/data

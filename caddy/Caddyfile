@@ -12,105 +12,128 @@
 # Upstream hostnames are pulled from env so the same Caddyfile works on
 # docker-compose (service names `relay`, `admin-ui`) and on Kubernetes /
 # Container Apps (fully-qualified service DNS passed in).
-
 {
-    email {$CADDY_ACME_EMAIL:admin@inchambers.ai}
+	email {$CADDY_ACME_EMAIL:admin@inchambers.ai}
 }
 
 {$GATEWAY_DOMAIN:localhost} {
-    tls {$CADDY_TLS_ISSUER:internal}
+	tls {$CADDY_TLS_ISSUER:internal}
 
-    # CORS is owned by the relay (tower-http CorsLayer → `*` on every response
-    # incl. OPTIONS and errors), satisfying the Claude for M365 third-party-
-    # gateway requirement. Caddy does NOT inject CORS — a duplicate
-    # Access-Control-Allow-Origin would be rejected by the browser.
+	# EDGE HARDENING: for production, front this gateway with a WAF / edge
+	# rate-limiter (e.g. Cloudflare) — the stock Caddy image has no rate-limit
+	# module. The relay already rate-limits the auth endpoints per-IP, and
+	# /admin-api bodies are capped below, but an edge WAF adds L7 DoS/bot
+	# protection and a network-level rate limit in front of everything.
 
-    handle /health {
-        # CORS so the inchambers add-in can probe this cross-origin to detect
-        # whether a gateway exists at gateway.<firm-domain> (convention routing).
-        header Access-Control-Allow-Origin "*"
-        respond "ok" 200
-    }
+	# Optional defense-in-depth IP allowlist for the admin console. When
+	# ADMIN_ALLOW_CIDRS is unset it defaults to all IPs, so this matcher
+	# never fires and behavior is unchanged. Set it (space/comma-separated
+	# CIDRs) to 403 admin requests from other IPs. NOTE: `remote_ip` is the
+	# direct peer — only meaningful when Caddy is the edge proxy; behind
+	# nginx/an LB, restrict at that layer (or set Caddy trusted_proxies).
+	@admin_blocked not remote_ip {$ADMIN_ALLOW_CIDRS:0.0.0.0/0 ::/0}
 
-    # Anthropic Messages surface for official Claude clients.
-    handle /v1/messages* {
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
-            flush_interval -1
-            transport http {
-                read_timeout 3600s
-                write_timeout 3600s
-            }
-        }
-    }
+	# CORS is owned by the relay (tower-http CorsLayer → `*` on every response
+	# incl. OPTIONS and errors), satisfying the Claude for M365 third-party-
+	# gateway requirement. Caddy does NOT inject CORS — a duplicate
+	# Access-Control-Allow-Origin would be rejected by the browser.
 
-    handle /v1/models {
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081}
-    }
+	handle /health {
+		# CORS so the inchambers add-in can probe this cross-origin to detect
+		# whether a gateway exists at gateway.<firm-domain> (convention routing).
+		header Access-Control-Allow-Origin "*"
+		respond "ok" 200
+	}
 
-    handle_path /admin {
-        redir /admin/ permanent
-    }
+	# Anthropic Messages surface for official Claude clients.
+	handle /v1/messages* {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
 
-    handle /admin/* {
-        reverse_proxy {$UPSTREAM_ADMIN:admin-ui:3000}
-    }
+	handle /v1/models {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081}
+	}
 
-    # Admin-API: rewrite `/admin-api/...` → `/admin/...` so the relay's
-    # `/admin/subscriptions`, `/admin/audit` routes match.
-    handle /admin-api/* {
-        uri replace /admin-api/ /admin/
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081}
-    }
+	handle_path /admin {
+		redir /admin/ permanent
+	}
 
-    # Subscription-model chat completions: strip `/subscription` and pass
-    # to the Rust relay. flush_interval -1 disables buffering for SSE.
-    handle /subscription/* {
-        uri strip_prefix /subscription
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
-            flush_interval -1
-            transport http {
-                read_timeout 3600s
-                write_timeout 3600s
-            }
-        }
-    }
+	handle /admin/* {
+		route {
+			respond @admin_blocked "Forbidden" 403
+			reverse_proxy {$UPSTREAM_ADMIN:admin-ui:3000}
+		}
+	}
 
-    # Built-in server-side tools (web_fetch / google_search / scc-*).
-    handle /api/tools/* {
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
-            flush_interval -1
-            transport http {
-                read_timeout 3600s
-                write_timeout 3600s
-            }
-        }
-    }
+	# Admin-API: rewrite `/admin-api/...` → `/admin/...` so the relay's
+	# `/admin/subscriptions`, `/admin/audit` routes match. Body is capped —
+	# auth + subscription-token payloads are only a few KB.
+	handle /admin-api/* {
+		request_body {
+			max_size 64KB
+		}
+		route {
+			respond @admin_blocked "Forbidden" 403
+			uri replace /admin-api/ /admin/
+			reverse_proxy {$UPSTREAM_RELAY:relay:8081}
+		}
+	}
 
-    # Native Anthropic Messages API passthrough.
-    handle /anthropic/* {
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
-            flush_interval -1
-            transport http {
-                read_timeout 3600s
-                write_timeout 3600s
-            }
-        }
-    }
+	# Subscription-model chat completions: strip `/subscription` and pass
+	# to the Rust relay. flush_interval -1 disables buffering for SSE.
+	handle /subscription/* {
+		uri strip_prefix /subscription
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
 
-    # Everything else (incl. bare /v1/chat/completions) → the Rust relay.
-    handle {
-        reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
-            flush_interval -1
-            transport http {
-                read_timeout 3600s
-                write_timeout 3600s
-            }
-        }
-    }
+	# Built-in server-side tools (web_fetch / google_search / scc-*).
+	handle /api/tools/* {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
 
-    log {
-        output stdout
-        format json
-        level INFO
-    }
+	# Native Anthropic Messages API passthrough.
+	handle /anthropic/* {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
+
+	# Everything else (incl. bare /v1/chat/completions) → the Rust relay.
+	handle {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
+
+	log {
+		output stdout
+		format json
+		level INFO
+	}
 }

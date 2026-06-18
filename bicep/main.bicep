@@ -63,6 +63,10 @@ param gatewayMasterKey string
 param litellmMasterKey string
 
 @secure()
+@description('Postgres password for the bundled DB. Must stay STABLE across redeploys (the DB volume persists), so supply your own value rather than regenerating. Generate once: openssl rand -hex 16. Replaces the old uniqueString() derivation, which was deterministic and not a secret.')
+param pgPassword string
+
+@secure()
 @description('Optional OpenRouter API key. Leave empty to configure later via the admin UI.')
 param openRouterApiKey string = ''
 
@@ -84,6 +88,9 @@ param imageRegistry string = 'ghcr.io/inchambers-ai'
 
 @description('Gateway image tag. Pin to a specific version for production; `latest` tracks the stable release.')
 param imageTag string = 'latest'
+
+@description('Source CIDR/prefix allowed to reach SSH (port 22). Default "*" = anywhere (backwards-compatible) — set to your admin IP/range for production, e.g. "203.0.113.4/32".')
+param sshSourcePrefix string = '*'
 
 // ────────────────────────────────────────────────────────────────────────────
 // Networking — public IP + NSG (22/80/443) + VNet + NIC
@@ -112,7 +119,7 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2023-11-01' = {
           direction: 'Inbound'
           access: 'Allow'
           protocol: 'Tcp'
-          sourceAddressPrefix: '*'
+          sourceAddressPrefix: sshSourcePrefix
           sourcePortRange: '*'
           destinationAddressPrefix: '*'
           destinationPortRange: '22'
@@ -239,7 +246,7 @@ var renderedCloudInit = replace(replace(replace(replace(replace(replace(replace(
   '__OPENROUTER_API_KEY__', openRouterApiKey),
   '__AZURE_FOUNDRY_URL__', foundryUrl),
   '__AZURE_FOUNDRY_KEY__', foundryKey),
-  '__PG_PASSWORD__', uniqueString(resourceGroup().id, name, 'pg')),
+  '__PG_PASSWORD__', pgPassword),
   '__IMAGE_REGISTRY__', imageRegistry),
   '__IMAGE_TAG__', imageTag)
 

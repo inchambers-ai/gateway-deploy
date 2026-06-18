@@ -29,7 +29,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{ .Values.externalDatabase.url }}
 {{- else -}}
 {{- $pw := required "secret.pgPassword is required when externalDatabase.url is unset" .Values.secret.pgPassword -}}
-postgres://{{ .Values.postgresql.auth.username }}:{{ $pw }}@{{ .Release.Name }}-postgresql.{{ .Release.Namespace }}.svc:5432/{{ .Values.postgresql.auth.database }}?sslmode=disable
+postgres://{{ .Values.postgresql.auth.username }}:{{ $pw }}@{{ .Release.Name }}-postgresql.{{ .Release.Namespace }}.svc:5432/{{ .Values.postgresql.auth.database }}?sslmode=prefer
 {{- end -}}
 {{- end -}}
 

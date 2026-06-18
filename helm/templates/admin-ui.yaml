@@ -23,6 +23,15 @@ spec:
         - name: admin-ui
           image: "{{ .Values.image.registry }}/ic-gateway-admin-ui:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # nginx-unprivileged base runs as uid 101 on a high port. No
+          # readOnlyRootFilesystem: nginx needs writable /tmp + /var/cache.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 3000
           resources: {{- toYaml .Values.adminUi.resources | nindent 12 }}

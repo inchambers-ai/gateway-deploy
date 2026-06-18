@@ -74,6 +74,19 @@
         "description": "LiteLLM admin key (random secret). Generate: \"sk-$(openssl rand -hex 24)\""
       }
     },
+    "pgPassword": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Postgres password for the bundled DB. Must stay STABLE across redeploys (the DB volume persists) — supply your own value, don't regenerate. Generate once: openssl rand -hex 16. Replaces the old uniqueString() derivation (deterministic, not secret)."
+      }
+    },
+    "sshSourcePrefix": {
+      "type": "string",
+      "defaultValue": "*",
+      "metadata": {
+        "description": "Source CIDR/prefix allowed to reach SSH (port 22). Default \"*\" = anywhere (backwards-compatible); set to your admin IP/range for production, e.g. \"203.0.113.4/32\"."
+      }
+    },
     "openRouterApiKey": {
       "type": "securestring",
       "defaultValue": "",
@@ -157,7 +170,7 @@
               "direction": "Inbound",
               "access": "Allow",
               "protocol": "Tcp",
-              "sourceAddressPrefix": "*",
+              "sourceAddressPrefix": "[parameters('sshSourcePrefix')]",
               "sourcePortRange": "*",
               "destinationAddressPrefix": "*",
               "destinationPortRange": "22"
@@ -272,7 +285,7 @@
         "osProfile": {
           "computerName": "[replace(parameters('name'), '-', '')]",
           "adminUsername": "azureuser",
-          "customData": "[base64(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(variables('cloudInit'), '__ORG_ID__', parameters('orgId')), '__GATEWAY_DOMAIN__', if(empty(parameters('gatewayDomain')), reference(resourceId('Microsoft.Network/publicIPAddresses', format('{0}-pip', parameters('name'))), '2023-11-01').dnsSettings.fqdn, parameters('gatewayDomain'))), '__ADMIN_EMAIL__', parameters('adminEmail')), '__ALLOWED_ORIGIN__', parameters('allowedOrigin')), '__JWKS_URL__', parameters('jwksUrl')), '__GATEWAY_MASTER_KEY__', parameters('gatewayMasterKey')), '__LITELLM_MASTER_KEY__', parameters('litellmMasterKey')), '__OPENROUTER_API_KEY__', parameters('openRouterApiKey')), '__AZURE_FOUNDRY_URL__', parameters('foundryUrl')), '__AZURE_FOUNDRY_KEY__', parameters('foundryKey')), '__PG_PASSWORD__', uniqueString(resourceGroup().id, parameters('name'), 'pg')), '__IMAGE_REGISTRY__', parameters('imageRegistry')), '__IMAGE_TAG__', parameters('imageTag')))]",
+          "customData": "[base64(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(variables('cloudInit'), '__ORG_ID__', parameters('orgId')), '__GATEWAY_DOMAIN__', if(empty(parameters('gatewayDomain')), reference(resourceId('Microsoft.Network/publicIPAddresses', format('{0}-pip', parameters('name'))), '2023-11-01').dnsSettings.fqdn, parameters('gatewayDomain'))), '__ADMIN_EMAIL__', parameters('adminEmail')), '__ALLOWED_ORIGIN__', parameters('allowedOrigin')), '__JWKS_URL__', parameters('jwksUrl')), '__GATEWAY_MASTER_KEY__', parameters('gatewayMasterKey')), '__LITELLM_MASTER_KEY__', parameters('litellmMasterKey')), '__OPENROUTER_API_KEY__', parameters('openRouterApiKey')), '__AZURE_FOUNDRY_URL__', parameters('foundryUrl')), '__AZURE_FOUNDRY_KEY__', parameters('foundryKey')), '__PG_PASSWORD__', parameters('pgPassword')), '__IMAGE_REGISTRY__', parameters('imageRegistry')), '__IMAGE_TAG__', parameters('imageTag')))]",
           "linuxConfiguration": {
             "disablePasswordAuthentication": true,
             "ssh": {

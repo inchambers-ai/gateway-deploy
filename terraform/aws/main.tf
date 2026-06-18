@@ -100,6 +100,14 @@ variable "image_tag" {
   default = "latest"
 }
 
+# Protect the RDS credential store from accidental/malicious teardown. Default
+# false keeps dev `terraform destroy` easy; set true for production (enables
+# deletion protection and forces a final snapshot).
+variable "enable_deletion_protection" {
+  type    = bool
+  default = false
+}
+
 locals {
   tags = {
     Project   = "inchambers-gateway"
@@ -139,7 +147,8 @@ resource "aws_ecr_repository" "repo" {
   for_each = toset(["relay", "litellm", "admin-ui", "caddy"])
   name     = "ic-gateway-${each.key}"
 
-  image_tag_mutability = "MUTABLE"
+  # IMMUTABLE so a pushed tag can't be silently overwritten (supply-chain).
+  image_tag_mutability = "IMMUTABLE"
   image_scanning_configuration { scan_on_push = true }
   tags = local.tags
 }
@@ -220,10 +229,14 @@ resource "aws_db_instance" "pg" {
   password               = var.pg_admin_password
   db_subnet_group_name   = aws_db_subnet_group.pg.name
   vpc_security_group_ids = [aws_security_group.pg.id]
-  skip_final_snapshot    = true
-  storage_encrypted      = true
-  publicly_accessible    = false
-  tags                   = local.tags
+  # In prod (enable_deletion_protection=true): take a final snapshot and block
+  # deletion. In dev (default): skip the snapshot so teardown stays easy.
+  skip_final_snapshot       = !var.enable_deletion_protection
+  final_snapshot_identifier = var.enable_deletion_protection ? "${var.name}-pg-final" : null
+  deletion_protection       = var.enable_deletion_protection
+  storage_encrypted         = true
+  publicly_accessible       = false
+  tags                      = local.tags
 }
 
 // Redis removed — the relay rate-limits in-memory; LiteLLM runs single-
@@ -312,6 +325,17 @@ resource "aws_iam_policy" "read_secrets" {
 resource "aws_iam_role_policy_attachment" "task_execution_secrets" {
   role       = aws_iam_role.task_execution.name
   policy_arn = aws_iam_policy.read_secrets.arn
+}
+
+# Minimal runtime role for the containers themselves. The app receives its
+# secrets as env vars injected by the EXECUTION role when the task starts, so
+# the task role needs NO AWS permissions. Keeping it empty means an RCE/SSRF
+# inside a container can't call Secrets Manager (previously it could, because
+# the execution role doubled as the task role).
+resource "aws_iam_role" "task" {
+  name               = "${var.name}-task"
+  assume_role_policy = data.aws_iam_policy_document.assume_ecs.json
+  tags               = local.tags
 }
 
 // Service Discovery namespace for internal service-to-service DNS.
@@ -461,6 +485,7 @@ module "relay_service" {
   subnets            = module.vpc.private_subnets
   security_groups    = [aws_security_group.apps.id]
   task_execution_arn = aws_iam_role.task_execution.arn
+  task_role_arn      = aws_iam_role.task.arn
   image              = "${aws_ecr_repository.repo["relay"].repository_url}:${var.image_tag}"
   container_port     = 8081
   environment = [
@@ -486,6 +511,7 @@ module "litellm_service" {
   subnets            = module.vpc.private_subnets
   security_groups    = [aws_security_group.apps.id]
   task_execution_arn = aws_iam_role.task_execution.arn
+  task_role_arn      = aws_iam_role.task.arn
   image              = "${aws_ecr_repository.repo["litellm"].repository_url}:${var.image_tag}"
   container_port     = 4000
   environment = [
@@ -514,6 +540,7 @@ module "admin_service" {
   subnets            = module.vpc.private_subnets
   security_groups    = [aws_security_group.apps.id]
   task_execution_arn = aws_iam_role.task_execution.arn
+  task_role_arn      = aws_iam_role.task.arn
   image              = "${aws_ecr_repository.repo["admin-ui"].repository_url}:${var.image_tag}"
   container_port     = 3000
   environment        = []
@@ -531,6 +558,7 @@ module "caddy_service" {
   subnets            = module.vpc.private_subnets
   security_groups    = [aws_security_group.apps.id]
   task_execution_arn = aws_iam_role.task_execution.arn
+  task_role_arn      = aws_iam_role.task.arn
   image              = "${aws_ecr_repository.repo["caddy"].repository_url}:${var.image_tag}"
   container_port     = 80
   environment = [

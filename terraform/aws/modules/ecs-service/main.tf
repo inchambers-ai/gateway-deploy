@@ -3,6 +3,13 @@ variable "cluster_arn" { type = string }
 variable "subnets" { type = list(string) }
 variable "security_groups" { type = list(string) }
 variable "task_execution_arn" { type = string }
+# Runtime role assumed by the container itself. Keep separate from (and more
+# restricted than) the execution role so an in-container compromise can't read
+# the execution role's secrets. Defaults to "" → no task role attached.
+variable "task_role_arn" {
+  type    = string
+  default = ""
+}
 variable "image" { type = string }
 variable "container_port" { type = number }
 variable "environment" { type = list(map(string)) }
@@ -46,7 +53,7 @@ resource "aws_ecs_task_definition" "td" {
   cpu                      = var.cpu
   memory                   = var.memory
   execution_role_arn       = var.task_execution_arn
-  task_role_arn            = var.task_execution_arn
+  task_role_arn            = var.task_role_arn != "" ? var.task_role_arn : var.task_execution_arn
 
   container_definitions = jsonencode([
     {

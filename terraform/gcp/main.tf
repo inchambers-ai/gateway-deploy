@@ -55,6 +55,12 @@ variable "allowed_origin" {
   type    = string
   default = "https://app.inchambers.ai"
 }
+# Protect the Cloud SQL instance (credential store) from accidental/malicious
+# `terraform destroy`. Default false keeps dev teardown easy; set true for prod.
+variable "enable_deletion_protection" {
+  type    = bool
+  default = false
+}
 variable "jwks_url" {
   type    = string
   default = "https://app.inchambers.ai/.well-known/jwks.json"
@@ -80,6 +86,7 @@ resource "google_project_service" "apis" {
     "vpcaccess.googleapis.com",
     "artifactregistry.googleapis.com",
     "compute.googleapis.com",
+    "servicenetworking.googleapis.com",
   ])
   service            = each.key
   disable_on_destroy = false
@@ -181,26 +188,49 @@ resource "google_vpc_access_connector" "conn" {
   depends_on    = [google_project_service.apis]
 }
 
+// ── Private Services Access (for the Cloud SQL private IP) ────────────────
+// Reserves a range and peers the VPC with servicenetworking so Cloud SQL can
+// receive a private IP reachable from Cloud Run via the connector. This is
+// what lets us drop the DB's public IP.
+resource "google_compute_global_address" "sql_psa" {
+  name          = "${var.name}-sql-psa"
+  purpose       = "VPC_PEERING"
+  address_type  = "INTERNAL"
+  prefix_length = 16
+  network       = google_compute_network.vpc.id
+}
+resource "google_service_networking_connection" "psa" {
+  network                 = google_compute_network.vpc.id
+  service                 = "servicenetworking.googleapis.com"
+  reserved_peering_ranges = [google_compute_global_address.sql_psa.name]
+  depends_on              = [google_project_service.apis]
+}
+
 // ── Cloud SQL ────────────────────────────────────────────────────────────
 resource "google_sql_database_instance" "pg" {
   name             = "${var.name}-pg"
   database_version = "POSTGRES_16"
   region           = var.region
-  depends_on       = [google_project_service.apis]
+  depends_on       = [google_project_service.apis, google_service_networking_connection.psa]
 
   settings {
     tier    = "db-f1-micro"
     edition = "ENTERPRISE"
     ip_configuration {
-      ipv4_enabled = true
-      // For production, disable public IP and use private_network instead.
+      // Private IP only — no public surface. Reached from Cloud Run over the
+      // VPC connector (ALL_TRAFFIC egress). Requires the PSA peering above.
+      ipv4_enabled    = false
+      private_network = google_compute_network.vpc.id
     }
     backup_configuration {
       enabled = true
       start_time = "03:00"
+      // For production also enable point_in_time_recovery_enabled = true.
     }
   }
-  deletion_protection = false
+  // Default false keeps `terraform destroy` easy for dev; set the variable true
+  // for production so the credential store can't be wiped accidentally.
+  deletion_protection = var.enable_deletion_protection
 }
 
 resource "google_sql_user" "gateway" {
@@ -220,7 +250,7 @@ resource "google_sql_database" "db" {
 
 // ── Cloud Run services ───────────────────────────────────────────────────
 locals {
-  db_url = "postgres://gateway:${urlencode(var.pg_admin_password)}@${google_sql_database_instance.pg.public_ip_address}:5432/gateway?sslmode=require"
+  db_url = "postgres://gateway:${urlencode(var.pg_admin_password)}@${google_sql_database_instance.pg.private_ip_address}:5432/gateway?sslmode=require"
 
   common_env = [
     { name = "GATEWAY_ORG_ID", value = var.org_id },
@@ -232,7 +262,11 @@ locals {
 resource "google_cloud_run_v2_service" "relay" {
   name     = "${var.name}-relay"
   location = var.region
-  ingress  = "INGRESS_TRAFFIC_ALL"
+  # Internal-only: reachable just from the VPC (i.e. via Caddy's connector),
+  # not from the public internet. Combined with allUsers invoker below, this is
+  # the network control that closes direct *.run.app access without needing
+  # Caddy to mint per-request ID tokens.
+  ingress = "INGRESS_TRAFFIC_INTERNAL_ONLY"
 
   template {
     timeout               = "3600s"
@@ -280,7 +314,7 @@ resource "google_cloud_run_v2_service" "relay" {
 resource "google_cloud_run_v2_service" "litellm" {
   name     = "${var.name}-litellm"
   location = var.region
-  ingress  = "INGRESS_TRAFFIC_ALL"
+  ingress  = "INGRESS_TRAFFIC_INTERNAL_ONLY"
 
   template {
     timeout               = "3600s"
@@ -336,7 +370,7 @@ resource "google_cloud_run_v2_service" "litellm" {
 resource "google_cloud_run_v2_service" "admin_ui" {
   name     = "${var.name}-admin"
   location = var.region
-  ingress  = "INGRESS_TRAFFIC_ALL"
+  ingress  = "INGRESS_TRAFFIC_INTERNAL_ONLY"
 
   template {
     timeout               = "3600s"
@@ -425,11 +459,18 @@ resource "google_cloud_run_v2_service_iam_member" "caddy_public" {
   member   = "allUsers"
 }
 
-// The relay/litellm/admin-ui services are public-invokable because Cloud
-// Run doesn't support "internal-only via other Cloud Run" without GCP ID
-// tokens — and we don't want Caddy to mint ID tokens per request. Auth
-// is enforced at the service layer: every inbound call must present a
-// valid inchambers.ai JWT with a matching org_id claim.
+// allUsers invoker is retained ON PURPOSE: the backends are now set to
+// INGRESS_TRAFFIC_INTERNAL_ONLY (above), so they are only reachable from the
+// VPC (i.e. via Caddy's connector), never from the public internet. Cloud Run
+// checks BOTH network ingress AND IAM; keeping allUsers means Caddy's
+// internal, unauthenticated requests pass the IAM check without Caddy having
+// to mint per-request Google ID tokens. The internet can't reach these URLs
+// at all, so allUsers here is not a public exposure.
+//
+// VERIFY ON A LIVE GCP PROJECT: confirm Caddy (connector, ALL_TRAFFIC egress)
+// can still reach the internal backends after this change. If a deploy can't
+// reach them, the rollback is to set these three services back to
+// ingress = "INGRESS_TRAFFIC_ALL".
 resource "google_cloud_run_v2_service_iam_member" "internal" {
   for_each = toset([
     google_cloud_run_v2_service.relay.name,
