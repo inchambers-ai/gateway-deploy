@@ -83,6 +83,19 @@
 		}
 	}
 
+	# Practice Management (PMA) records → relay. Without this the catch-all below
+	# would send /api/pma/* to the admin-ui SPA (200 HTML for GET, 405 for OPTIONS
+	# preflight), breaking the add-in's cross-origin PMA calls.
+	handle /api/pma/* {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
+
 	handle /anthropic/* {
 		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
 			flush_interval -1
