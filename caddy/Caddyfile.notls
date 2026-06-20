@@ -96,6 +96,25 @@
 		}
 	}
 
+	# Firm-data relay surfaces that otherwise fall through to the admin-ui SPA:
+	#  * /mcp           — the gateway MCP server (Streamable HTTP) that external
+	#                     AI clients (Claude Desktop/Code, ChatGPT) connect to.
+	#  * /api/memory*    — Firm Memory persist + recall.
+	#  * /api/precedents* — Firm Precedent Corpus (index/search/stats).
+	#  * /api/embed       — gateway-local embedding model.
+	# Without these the catch-all serves them from the admin-ui SPA (405 on POST),
+	# breaking the add-in's cross-origin calls and remote-MCP clients.
+	@relay_firmdata path /mcp /mcp/* /api/memory* /api/precedents* /api/embed*
+	handle @relay_firmdata {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
+
 	handle /anthropic/* {
 		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
 			flush_interval -1
