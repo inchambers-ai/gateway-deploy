@@ -125,14 +125,15 @@
 		}
 	}
 
-	# Everything else → the admin console SPA at the gateway root (/, /assets/*,
-	# client-side routes). All relay/API paths are matched above, so only the UI
-	# reaches here. Optional IP allowlist applies to the console, not the AI
-	# surface (which Claude clients hit from anywhere).
+	# Everything else → the unified firm platform SPA at the gateway root (/,
+	# /assets/*, client-side routes). All relay/API paths are matched above, so
+	# only the UI reaches here. The platform serves both the lawyer-facing PMA
+	# and (role-gated) the firm-IT admin sections. Optional IP allowlist applies
+	# to the console UI, not the AI surface (which Claude clients hit anywhere).
 	handle {
 		route {
 			respond @admin_blocked "Forbidden" 403
-			reverse_proxy {$UPSTREAM_ADMIN:admin-ui:3000}
+			reverse_proxy {$UPSTREAM_ADMIN:platform-ui:3000}
 		}
 	}
 
