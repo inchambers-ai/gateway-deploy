@@ -102,9 +102,12 @@
 	#  * /api/memory*    — Firm Memory persist + recall.
 	#  * /api/precedents* — Firm Precedent Corpus (index/search/stats).
 	#  * /api/embed       — gateway-local embedding model.
-	# Without these the catch-all serves them from the admin-ui SPA (405 on POST),
-	# breaking the add-in's cross-origin calls and remote-MCP clients.
-	@relay_firmdata path /mcp /mcp/* /api/memory* /api/precedents* /api/embed*
+	#  * /api/connectors* — org Microsoft connector (search/document).
+	#  * /api/platform*   — platform module enable/disable flags.
+	#  * /auth/*          — gateway-local member (lawyer) login.
+	# Without these the catch-all serves them from the platform-ui SPA (200 HTML on
+	# GET, 405 on POST), breaking member login, module gating, and connector calls.
+	@relay_firmdata path /mcp /mcp/* /api/memory* /api/precedents* /api/embed* /api/connectors* /api/platform* /auth/*
 	handle @relay_firmdata {
 		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
 			flush_interval -1
