@@ -107,7 +107,7 @@
 	#  * /auth/*          — gateway-local member (lawyer) login.
 	# Without these the catch-all serves them from the platform-ui SPA (200 HTML on
 	# GET, 405 on POST), breaking member login, module gating, and connector calls.
-	@relay_firmdata path /mcp /mcp/* /api/memory* /api/precedents* /api/embed* /api/connectors* /api/ms/* /api/platform* /api/pipelines* /api/pipeline-events* /auth/*
+	@relay_firmdata path /mcp /mcp/* /api/memory* /api/precedents* /api/embed* /api/connectors* /api/ms/* /api/platform* /api/pipelines* /api/pipeline-events* /api/mcp-servers* /auth/*
 	handle @relay_firmdata {
 		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
 			flush_interval -1
