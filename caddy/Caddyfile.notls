@@ -96,6 +96,13 @@
 		}
 	}
 
+	# Client portal API → relay. Covers both the PUBLIC client SSO
+	# (/client-api/auth/*) and the require_client-gated client data routes. Must
+	# sit above the catch-all or the SPA would serve these as 200 HTML.
+	handle /client-api/* {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081}
+	}
+
 	# Firm-data relay surfaces that otherwise fall through to the admin-ui SPA:
 	#  * /mcp           — the gateway MCP server (Streamable HTTP) that external
 	#                     AI clients (Claude Desktop/Code, ChatGPT) connect to.
