@@ -1,17 +1,14 @@
-# Caddy reverse proxy for inchambers-gateway.
+# Caddy reverse proxy for inchambers-gateway (TLS edge — Caddy terminates TLS).
 #
-# Path routing:
-#   /admin/*              → admin-ui container (SPA)
-#   /admin-api/*          → relay (admin endpoints; prefix rewritten to /admin/*)
-#   /subscription/*       → relay (subscription-model chat completions)
-#   /v1/messages*, /v1/models → relay (Anthropic Messages surface for official
-#                            Claude clients: Claude for M365, Claude Code)
-#   /anthropic/v1/*       → relay (native Anthropic Messages API passthrough)
-#   anything else         → relay (the relay is the only backend)
+# This MIRRORS caddy/Caddyfile.notls (the config used on the ewarren deploy,
+# where nginx terminates TLS and Caddy runs plain-HTTP). Keep the two in sync:
+# the ONLY differences here are the `:443` + `tls` directive and the ACME email.
+# Routing model (same as notls): the unified platform-ui SPA is served at the
+# gateway root; every relay/API surface is matched explicitly ABOVE the catch-all
+# (a path that falls through to the catch-all is served the SPA's index.html).
 #
-# Upstream hostnames are pulled from env so the same Caddyfile works on
-# docker-compose (service names `relay`, `admin-ui`) and on Kubernetes /
-# Container Apps (fully-qualified service DNS passed in).
+# Upstream hostnames come from env so the same Caddyfile works on docker-compose
+# (service names `relay`, `platform-ui`) and on Kubernetes / Container Apps.
 {
 	email {$CADDY_ACME_EMAIL:admin@inchambers.ai}
 }
@@ -21,22 +18,17 @@
 
 	# EDGE HARDENING: for production, front this gateway with a WAF / edge
 	# rate-limiter (e.g. Cloudflare) — the stock Caddy image has no rate-limit
-	# module. The relay already rate-limits the auth endpoints per-IP, and
-	# /admin-api bodies are capped below, but an edge WAF adds L7 DoS/bot
-	# protection and a network-level rate limit in front of everything.
+	# module. The relay rate-limits auth per-IP and /admin-api bodies are capped
+	# below, but an edge WAF adds L7 DoS/bot protection.
 
-	# Optional defense-in-depth IP allowlist for the admin console. When
-	# ADMIN_ALLOW_CIDRS is unset it defaults to all IPs, so this matcher
-	# never fires and behavior is unchanged. Set it (space/comma-separated
-	# CIDRs) to 403 admin requests from other IPs. NOTE: `remote_ip` is the
-	# direct peer — only meaningful when Caddy is the edge proxy; behind
-	# nginx/an LB, restrict at that layer (or set Caddy trusted_proxies).
+	# Optional defense-in-depth IP allowlist for the admin console. Unset
+	# ADMIN_ALLOW_CIDRS defaults to all IPs (matcher never fires). `remote_ip` is
+	# the direct peer — only meaningful when Caddy is the edge; behind nginx/an LB
+	# restrict at that layer.
 	@admin_blocked not remote_ip {$ADMIN_ALLOW_CIDRS:0.0.0.0/0 ::/0}
 
-	# CORS is owned by the relay (tower-http CorsLayer → `*` on every response
-	# incl. OPTIONS and errors), satisfying the Claude for M365 third-party-
-	# gateway requirement. Caddy does NOT inject CORS — a duplicate
-	# Access-Control-Allow-Origin would be rejected by the browser.
+	# CORS is owned by the relay (tower-http CorsLayer → `*`). Caddy does NOT
+	# inject CORS — a duplicate Access-Control-Allow-Origin would be rejected.
 
 	handle /health {
 		# CORS so the inchambers add-in can probe this cross-origin to detect
@@ -45,8 +37,14 @@
 		respond "ok" 200
 	}
 
-	# Anthropic Messages surface for official Claude clients.
-	handle /v1/messages* {
+	# Running version (hub-and-spoke updater reads this) → relay.
+	handle /version {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081}
+	}
+
+	# Anthropic Messages surface for official Claude clients (Claude for M365,
+	# Claude Code, Claude Desktop): the whole bare /v1/* surface → relay.
+	handle /v1/* {
 		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
 			flush_interval -1
 			transport http {
@@ -56,24 +54,10 @@
 		}
 	}
 
-	handle /v1/models {
-		reverse_proxy {$UPSTREAM_RELAY:relay:8081}
-	}
+	# The console used to live under /admin/; it's now at the gateway root.
+	@admin_legacy path /admin /admin/*
+	redir @admin_legacy / permanent
 
-	handle_path /admin {
-		redir /admin/ permanent
-	}
-
-	handle /admin/* {
-		route {
-			respond @admin_blocked "Forbidden" 403
-			reverse_proxy {$UPSTREAM_ADMIN:admin-ui:3000}
-		}
-	}
-
-	# Admin-API: rewrite `/admin-api/...` → `/admin/...` so the relay's
-	# `/admin/subscriptions`, `/admin/audit` routes match. Body is capped —
-	# auth + subscription-token payloads are only a few KB.
 	handle /admin-api/* {
 		request_body {
 			max_size 64KB
@@ -85,8 +69,6 @@
 		}
 	}
 
-	# Subscription-model chat completions: strip `/subscription` and pass
-	# to the Rust relay. flush_interval -1 disables buffering for SSE.
 	handle /subscription/* {
 		uri strip_prefix /subscription
 		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
@@ -98,7 +80,6 @@
 		}
 	}
 
-	# Built-in server-side tools (web_fetch / google_search / scc-*).
 	handle /api/tools/* {
 		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
 			flush_interval -1
@@ -109,7 +90,39 @@
 		}
 	}
 
-	# Native Anthropic Messages API passthrough.
+	# Practice Management (PMA) records → relay.
+	handle /api/pma/* {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
+
+	# Client portal API → relay (public client SSO /client-api/auth/* plus the
+	# require_client-gated client data routes).
+	handle /client-api/* {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081}
+	}
+
+	# Firm-data relay surfaces that otherwise fall through to the SPA: gateway MCP,
+	# Firm Memory/Precedents/embeddings, org connectors, platform flags, member
+	# login (/auth/*), the accounting connector OAuth callback (/connector-oauth/*,
+	# a browser redirect from QuickBooks/Xero/Zoho with no JWT), and the exit-node
+	# WebSocket. Without these the catch-all serves them from the SPA (200 HTML).
+	@relay_firmdata path /mcp /mcp/* /api/memory* /api/precedents* /api/embed* /api/connectors* /api/ms/* /api/platform* /api/pipelines* /api/pipeline-events* /api/mcp-servers* /api/exit-node* /auth/* /connector-oauth/*
+	handle @relay_firmdata {
+		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
+			flush_interval -1
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
+
 	handle /anthropic/* {
 		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
 			flush_interval -1
@@ -120,14 +133,13 @@
 		}
 	}
 
-	# Everything else (incl. bare /v1/chat/completions) → the Rust relay.
+	# Everything else → the unified firm platform SPA at the gateway root (/,
+	# /assets/*, /portal*, client-side routes). All relay/API paths are matched
+	# above, so only the UI reaches here.
 	handle {
-		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
-			flush_interval -1
-			transport http {
-				read_timeout 3600s
-				write_timeout 3600s
-			}
+		route {
+			respond @admin_blocked "Forbidden" 403
+			reverse_proxy {$UPSTREAM_ADMIN:platform-ui:3000}
 		}
 	}
 
