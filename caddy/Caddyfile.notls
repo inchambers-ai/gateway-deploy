@@ -105,13 +105,17 @@
 	#  * /api/connectors* — org Microsoft connector (search/document).
 	#  * /api/platform*   — platform module enable/disable flags.
 	#  * /auth/*          — gateway-local member (lawyer) login.
+	#  * /connector-oauth/* — accounting connector OAuth callback (browser
+	#                     redirect from QuickBooks/Xero/Zoho, no JWT); without
+	#                     this the catch-all serves the SPA and consent silently
+	#                     fails (200 HTML instead of the relay completing it).
 	#  * /api/exit-node*  — residential exit-node WebSocket: the desktop dials it
 	#                     to register as the user's egress tunnel. reverse_proxy
 	#                     auto-upgrades the WS; without this the catch-all sends
 	#                     the upgrade to the SPA and it fails.
 	# Without these the catch-all serves them from the platform-ui SPA (200 HTML on
 	# GET, 405 on POST), breaking member login, module gating, and connector calls.
-	@relay_firmdata path /mcp /mcp/* /api/memory* /api/precedents* /api/embed* /api/connectors* /api/ms/* /api/platform* /api/pipelines* /api/pipeline-events* /api/mcp-servers* /api/exit-node* /auth/*
+	@relay_firmdata path /mcp /mcp/* /api/memory* /api/precedents* /api/embed* /api/connectors* /api/ms/* /api/platform* /api/pipelines* /api/pipeline-events* /api/mcp-servers* /api/exit-node* /auth/* /connector-oauth/*
 	handle @relay_firmdata {
 		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
 			flush_interval -1
