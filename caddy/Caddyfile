@@ -112,7 +112,7 @@
 	# login (/auth/*), the accounting connector OAuth callback (/connector-oauth/*,
 	# a browser redirect from QuickBooks/Xero/Zoho with no JWT), and the exit-node
 	# WebSocket. Without these the catch-all serves them from the SPA (200 HTML).
-	@relay_firmdata path /mcp /mcp/* /api/memory* /api/precedents* /api/embed* /api/connectors* /api/ms/* /api/platform* /api/pipelines* /api/pipeline-events* /api/mcp-servers* /api/exit-node* /auth/* /connector-oauth/*
+	@relay_firmdata path /mcp /mcp/* /api/memory* /api/precedents* /api/embed* /api/connectors* /api/ms/* /api/platform* /api/pipelines* /api/pipeline-events* /api/sync* /api/mcp-servers* /api/exit-node* /auth/* /connector-oauth/*
 	handle @relay_firmdata {
 		reverse_proxy {$UPSTREAM_RELAY:relay:8081} {
 			flush_interval -1
