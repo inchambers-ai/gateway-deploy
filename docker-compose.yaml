@@ -86,7 +86,9 @@ services:
     cap_drop: [ALL]
 
   postgres:
-    image: postgres:16-alpine@sha256:e013e867e712fec275706a6c51c966f0bb0c93cfa8f51000f85a15f9865a28cb
+    # pgvector image (Debian-based) for the precedent-corpus HNSW ANN index.
+    # Re-pin by digest before prod; pgvector/pgvector has no alpine tag.
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
