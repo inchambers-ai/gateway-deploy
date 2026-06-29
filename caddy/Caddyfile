@@ -27,12 +27,25 @@
 	# restrict at that layer.
 	@admin_blocked not remote_ip {$ADMIN_ALLOW_CIDRS:0.0.0.0/0 ::/0}
 
-	# CORS is owned by the relay (tower-http CorsLayer → `*`). Caddy does NOT
-	# inject CORS — a duplicate Access-Control-Allow-Origin would be rejected.
+	# CORS: the relay owns CORS on actual (non-OPTIONS) responses via its
+	# tower-http CorsLayer (→ Access-Control-Allow-Origin: *). Caddy handles
+	# two edge cases the relay can't cover:
+	#  1. OPTIONS preflight — answered here so preflights succeed even when
+	#     the relay is restarting / unreachable.
+	#  2. handle_errors — Caddy-generated 502/503 (relay down) get CORS
+	#     headers so the browser exposes the error to JS instead of a
+	#     silent CORS block.
+
+	@cors_preflight method OPTIONS
+	handle @cors_preflight {
+		header Access-Control-Allow-Origin "*"
+		header Access-Control-Allow-Methods "*"
+		header Access-Control-Allow-Headers "*"
+		header Access-Control-Max-Age "86400"
+		respond 204
+	}
 
 	handle /health {
-		# CORS so the inchambers add-in can probe this cross-origin to detect
-		# whether a gateway exists at gateway.<firm-domain> (convention routing).
 		header Access-Control-Allow-Origin "*"
 		respond "ok" 200
 	}
@@ -141,6 +154,13 @@
 			respond @admin_blocked "Forbidden" 403
 			reverse_proxy {$UPSTREAM_ADMIN:platform-ui:3000}
 		}
+	}
+
+	handle_errors {
+		header Access-Control-Allow-Origin "*"
+		header Access-Control-Allow-Methods "*"
+		header Access-Control-Allow-Headers "*"
+		respond "{err.status_code}" {err.status_code}
 	}
 
 	log {
